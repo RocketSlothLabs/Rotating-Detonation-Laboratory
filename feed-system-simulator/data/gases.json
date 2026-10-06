@@ -1,0 +1,33 @@
+{
+  "_comment": "Gas property table. molar_mass in g/mol, viscosity in Pa*s. Add entries freely; the app reads this file at startup.",
+  "gases": [
+    {
+      "name": "O2",
+      "display_name": "Oxygen",
+      "molar_mass": 32.00,
+      "gamma": 1.40,
+      "viscosity": 2.07e-5
+    },
+    {
+      "name": "CH4",
+      "display_name": "Methane",
+      "molar_mass": 16.042,
+      "gamma": 1.32,
+      "viscosity": 1.10e-5
+    },
+    {
+      "name": "N2",
+      "display_name": "Nitrogen",
+      "molar_mass": 28.014,
+      "gamma": 1.40,
+      "viscosity": 1.76e-5
+    },
+    {
+      "name": "air",
+      "display_name": "Air (Sg reference)",
+      "molar_mass": 28.9647,
+      "gamma": 1.40,
+      "viscosity": 1.81e-5
+    }
+  ]
+}

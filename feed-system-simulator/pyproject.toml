@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pidsim"
+version = "0.1.0"
+description = "Interactive P&ID flow simulator for pressurized gas feed systems"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "PySide6>=6.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["pidsim*"]
+
+[tool.setuptools.package-data]
+pidsim = ["../data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

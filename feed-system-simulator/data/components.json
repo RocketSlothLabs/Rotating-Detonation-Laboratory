@@ -1,0 +1,150 @@
+{
+  "_comment": [
+    "User-editable part library. Cv values are the manufacturer flow coefficients.",
+    "'type' must match a pidsim.model.components.ComponentType value.",
+    "'max_pressure_psig' may be null where a rating has not been recorded.",
+    "Series chains combine as 1/Cv_tot^2 = sum(1/Cv_i^2); for reference, the",
+    "3/4->3/8 reducer plus five 3/8 elements gives Cv 0.732, and plus three",
+    "gives Cv 0.923 -- the two values used by the validated reference cases."
+  ],
+  "parts": [
+    {
+      "key": "pipe_075_mm",
+      "name": "3/4\" Pipe (M-M)",
+      "type": "pipe",
+      "cv": 10.8,
+      "inlet_size": "3/4\" NPT M",
+      "outlet_size": "3/4\" NPT M",
+      "connection_type": "NPT",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "solenoid_075",
+      "name": "3/4\" Solenoid Valve",
+      "type": "solenoid_valve",
+      "cv": 9.3,
+      "inlet_size": "3/4\" NPT",
+      "outlet_size": "3/4\" NPT",
+      "connection_type": "NPT",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "ball_valve_075",
+      "name": "3/4\" Ball Valve",
+      "type": "ball_valve",
+      "cv": 10.0,
+      "inlet_size": "3/4\" NPT",
+      "outlet_size": "3/4\" NPT",
+      "connection_type": "NPT",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "check_valve_075_mm",
+      "name": "3/4\" Check Valve (M-M)",
+      "type": "check_valve",
+      "cv": 7.4,
+      "inlet_size": "3/4\" NPT M",
+      "outlet_size": "3/4\" NPT M",
+      "connection_type": "NPT",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "adapter_075_ff",
+      "name": "3/4\" Adapter Fitting (F-F)",
+      "type": "adapter",
+      "cv": 10.8,
+      "inlet_size": "3/4\" NPT F",
+      "outlet_size": "3/4\" NPT F",
+      "connection_type": "NPT",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "reducer_075m_038f",
+      "name": "3/4\" M to 3/8\" F Reducer",
+      "type": "reducer",
+      "cv": 2.7,
+      "inlet_size": "3/4\" NPT M",
+      "outlet_size": "3/8\" NPT F",
+      "connection_type": "NPT",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "npt_jic_075",
+      "name": "3/4\" NPT-JIC Adapter",
+      "type": "adapter",
+      "cv": 7.1,
+      "inlet_size": "3/4\" NPT",
+      "outlet_size": "3/4\" JIC",
+      "connection_type": "NPT/JIC",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "jic_hose_075",
+      "name": "3/4\" JIC-Hose Adapter",
+      "type": "adapter",
+      "cv": 7.1,
+      "inlet_size": "3/4\" JIC",
+      "outlet_size": "3/4\" Hose",
+      "connection_type": "JIC",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "ss_hose_075",
+      "name": "3/4\" SS Braided Hose",
+      "type": "hose",
+      "cv": 7.1,
+      "inlet_size": "3/4\" Hose",
+      "outlet_size": "3/4\" Hose",
+      "connection_type": "Hose",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "npt_jic_038",
+      "name": "3/8\" NPT-JIC Adapter",
+      "type": "adapter",
+      "cv": 1.7,
+      "inlet_size": "3/8\" NPT",
+      "outlet_size": "3/8\" JIC",
+      "connection_type": "NPT/JIC",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "jic_hose_038",
+      "name": "3/8\" JIC-Hose Adapter",
+      "type": "adapter",
+      "cv": 1.7,
+      "inlet_size": "3/8\" JIC",
+      "outlet_size": "3/8\" Hose",
+      "connection_type": "JIC",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "ss_hose_038",
+      "name": "3/8\" SS Braided Hose",
+      "type": "hose",
+      "cv": 1.7,
+      "inlet_size": "3/8\" Hose",
+      "outlet_size": "3/8\" Hose",
+      "connection_type": "Hose",
+      "max_pressure_psig": null
+    },
+    {
+      "key": "matheson_3200_ch4",
+      "name": "Matheson 3200/3240 High-Flow Regulator",
+      "type": "regulator",
+      "manufacturer": "Matheson",
+      "part_number": "3200/3240",
+      "cv": 1.0,
+      "inlet_size": "CGA-350",
+      "outlet_size": "1/4\" NPT F",
+      "connection_type": "CGA",
+      "max_pressure_psig": 3000.0,
+      "outlet_setpoint_psig": 250.0,
+      "outlet_min_psig": 0.0,
+      "outlet_max_psig": 250.0,
+      "inlet_min_psig": 0.0,
+      "inlet_max_psig": 3000.0,
+      "notes": "CGA-350 inlet is the CH4 connection."
+    }
+  ]
+}
