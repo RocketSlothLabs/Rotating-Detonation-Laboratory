@@ -14,11 +14,14 @@ dependencies = [
     "PySide6>=6.5",
 ]
 
+[project.scripts]
+pidsim = "pidsim.gui.app:main"
+
 [tool.setuptools.packages.find]
 include = ["pidsim*"]
 
 [tool.setuptools.package-data]
-pidsim = ["../data/*.json"]
+pidsim = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

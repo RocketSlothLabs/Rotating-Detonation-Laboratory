@@ -10,31 +10,37 @@ injector physics is modelled.
 
 ## Running
 
+Requires **Python 3.11 or newer**. Clone the repo, then from this directory
+(`feed-system-simulator/`):
+
 ```powershell
-cd "RDE FEEDLINE\pid-sim"
-.\.venv\Scripts\python.exe -m pidsim
+# Windows (PowerShell)
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\pidsim
 ```
+
+```bash
+# macOS / Linux
+python3 -m venv .venv
+./.venv/bin/python -m pip install -e .
+./.venv/bin/pidsim
+```
+
+`pip install -e .` pulls in numpy, scipy, matplotlib and PySide6 automatically
+(see `pyproject.toml`) and registers the `pidsim` command inside the venv. If
+you'd rather not use the console command, `python -m pidsim` works the same
+way from an activated venv.
 
 The app opens on a worked example. `File -> Load example` has three, and each
 reproduces a validated reference case.
 
-Tests:
+Tests (also needs `pip install pytest` if you skipped it above — it's not a
+runtime dependency, only a dev one):
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-## Environment
-
-`.venv` is a virtual environment layered on the miniforge `cantera` interpreter
-(Python 3.12), inheriting numpy/scipy/matplotlib/PySide6 from it and adding
-pytest of its own. Conda could not build a fresh environment on this machine —
-`conda create` fails SSL certificate verification against conda-forge, though
-pip reaches PyPI fine. To rebuild:
-
-```powershell
-& "$env:USERPROFILE\miniforge3\envs\cantera\python.exe" -m venv --system-site-packages .venv
 .\.venv\Scripts\python.exe -m pip install pytest
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## Layout
@@ -46,9 +52,9 @@ pidsim/
   model/            components, network graph, part library, project save/load
   solver/           steady nodal solver, transient integrator, vessel dynamics
   gui/              PySide6 canvas, palette, property editor, plots
-data/
-  gases.json        gas property table -- edit freely
-  components.json   part library -- edit freely
+  data/
+    gases.json        gas property table -- edit freely
+    components.json   part library -- edit freely
 tests/              113 tests; test_validation.py is the gate
 ```
 

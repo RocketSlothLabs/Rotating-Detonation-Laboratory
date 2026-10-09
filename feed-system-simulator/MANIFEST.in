@@ -1,0 +1,4 @@
+# Ensures pidsim/data/*.json is included when building a source
+# distribution (python -m build --sdist), not only a wheel. package-data in
+# pyproject.toml already covers the wheel; this covers the sdist step too.
+recursive-include pidsim/data *.json

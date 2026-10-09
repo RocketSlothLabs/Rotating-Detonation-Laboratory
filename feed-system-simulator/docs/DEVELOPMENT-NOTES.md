@@ -302,3 +302,93 @@ Rendering under the Qt `offscreen` platform produces tofu boxes for all text,
 because that platform has no font provider configured. Under the real Windows
 platform — which the app and its PNG export use — text renders correctly. Do
 not chase this as a bug.
+
+---
+
+## 11. Making the repo runnable for a stranger (post-upload fixes)
+
+The project was first pushed via GitHub's browser "upload files" drag-and-drop
+rather than `git add`/`git commit`, which bypassed `.gitignore` entirely.
+Two things slipped through as a result, both fixed in the same pass once
+someone other than the original author tried to actually run it:
+
+**Compiled bytecode (30 `.pyc` files) was committed.** `.gitignore` lists
+`__pycache__/`, but that only stops *new* untracked files from being added —
+it does nothing for a bulk web upload that stages everything on disk
+regardless. Removed with `git rm -r --cached`.
+
+**Data file packaging worked by accident, not by design.** `data/` sat at the
+project root, a sibling of `pidsim/`, with `package_data = {"pidsim":
+["../data/*.json"]}` in `pyproject.toml` escaping the package directory to
+reach it. This happened to work on the original dev machine's setuptools
+version — confirmed by building a real wheel and inspecting its `RECORD` —
+but it is not a documented or guaranteed mechanism, and nothing guarantees a
+source distribution (`python -m build --sdist`) would include a `..`-escaped
+path at all without an explicit `MANIFEST.in`.
+
+Fixed by moving the data files to **inside** the package
+(`pidsim/data/*.json`), which is the standard, supported pattern:
+`package_data = {"pidsim": ["data/*.json"]}`, `pidsim/paths.py` resolves
+`Path(__file__).resolve().parent / "data"` instead of `.parent.parent`, and a
+`MANIFEST.in` covers the sdist case too. Verified by installing into a throwaway
+venv both ways — `pip install -e .` (the normal contributor flow) and a real
+non-editable `pip install .` — and confirming `get_gas("O2")` resolves
+correctly in both.
+
+**Also added**: a `[project.scripts]` entry so `pip install -e .` registers a
+plain `pidsim` command, instead of requiring `python -m pidsim`.
+
+**README rewritten.** The original `## Running` / `## Environment` sections
+gave the exact path and conda environment of the development machine
+(`RDE FEEDLINE\pid-sim`, a specific miniforge `cantera` interpreter) — none of
+which exists on anyone else's computer. Replaced with a plain
+`venv` + `pip install -e .` flow, given for both PowerShell and bash, using
+only the path relative to this file. The conda/SSL detail from §10 above is
+historical record of *this* machine's quirks, not a setup requirement, so it
+stayed out of the README.
+
+**Verification of the fix, and one more machine-specific wrinkle found while
+checking it.** Built a completely clean venv from a bare interpreter (no
+`--system-site-packages`), ran `pip install -e .` with nothing pre-installed,
+and confirmed all 113 non-GUI tests (physics/model/solver/roundtrip — the
+validated engineering core) pass without any special setup. That proves the
+packaging fix above is complete and correct.
+
+The GUI tests, however, failed to even *import* PySide6 in that clean venv:
+`ImportError: DLL load failed while importing QtCore: The specified procedure
+could not be found.` Chased this down rather than writing it off:
+
+- A **freshly `pip install`ed PySide6** (tried both 6.11.2 and 6.12.0, the
+  official PyPI wheels) fails this way regardless of which interpreter serves
+  as the venv's base — including a bare miniforge interpreter with no
+  conda-installed Qt package anywhere near it. So it isn't the conda/Qt DLL
+  conflict it first looked like.
+- **conda-forge's own PySide6 build** (version 6.11.2, reused via
+  `--system-site-packages` rather than pip-installed fresh) imports and runs
+  correctly every time — this is what every earlier GUI test and screenshot in
+  this project's history actually ran on.
+
+So the PyPI wheel itself is tripping over something specific to this one
+machine's accumulated runtime DLLs (plausible culprits: years of overlapping
+Visual Studio / Visual C++ redistributable installs and multiple conda
+environments, each dropping their own `vcruntime140.dll`/`msvcp140.dll`
+somewhere Windows' DLL search order can reach). This is **not** a defect in
+the project — the same `pip install PySide6` that fails here is what ordinary
+Windows installations run successfully every day — so the README's standard
+`pip install -e .` advice was left unchanged; weakening it to work around one
+machine's quirk would make it worse for everyone else.
+
+For continued work on *this* machine specifically, the local
+`feed-system-simulator/.venv` was (re)built the way that is proven to work:
+
+```powershell
+& "<conda-env-with-a-working-PySide6>\python.exe" -m venv --system-site-packages .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe -m pip install pytest
+```
+
+If you hit the identical `DLL load failed ... QtCore` error on a different
+machine, it is very unlikely to be this same cause unless that machine also
+has a similarly long, overlapping history of conda/VS installs. Worth trying
+first: update the Microsoft Visual C++ Redistributable, and/or
+`pip install --force-reinstall PySide6`.
