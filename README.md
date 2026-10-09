@@ -34,3 +34,8 @@ cd feed-system-simulator
 python -m pytest -q      # 129 tests; test_validation.py is the gate
 python -m pidsim         # launch the GUI
 ```
+
+## Contributing
+
+Want to change something, not just run it? See [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for the fork/branch/PR workflow.
