@@ -1,0 +1,69 @@
+name: Tests
+
+# Runs the feed-system-simulator test suite on every PR into main, and on any
+# direct push to main. test_validation.py is the gate that matters most here:
+# it reproduces five hand-validated reference cases, and nothing should merge
+# that breaks them.
+#
+# Three legs:
+#   - Ubuntu x Python 3.11 and 3.12: fast, no OS-specific quirks, covers the
+#     Python version range pyproject.toml declares support for.
+#   - Windows x Python 3.12: the lab's actual day-to-day platform, and the one
+#     that would have caught the data-file packaging bug this workflow was
+#     added after (see docs/DEVELOPMENT-NOTES.md, section 11) automatically,
+#     on every PR, instead of someone finding it by hand.
+#
+# GUI tests run headlessly via QT_QPA_PLATFORM=offscreen. On Linux this also
+# needs Qt's own runtime shared libraries (libEGL, libxkbcommon, etc.), which
+# a bare ubuntu-latest runner does not have -- tlambert03/setup-qt-libs
+# installs exactly the set PySide6/PyQt need for this, and is the standard
+# tool for it in the scientific Python ecosystem (used by napari and others).
+# Without it, `from PySide6.QtCore import QPointF` fails to load its native
+# extension and test collection errors out -- pytest.importorskip("PySide6")
+# does NOT save us here, since it only catches PySide6 not being installed at
+# all, not its compiled Qt libraries failing to load.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: feed-system-simulator/pyproject.toml
+
+      - name: Install Qt runtime libraries (Linux only)
+        if: runner.os == 'Linux'
+        uses: tlambert03/setup-qt-libs@v1
+
+      - name: Install the project
+        working-directory: feed-system-simulator
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Run tests
+        working-directory: feed-system-simulator
+        run: pytest -q

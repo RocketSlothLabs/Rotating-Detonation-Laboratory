@@ -1,5 +1,7 @@
 # Rotating Detonation Laboratory
 
+[![Tests](https://github.com/aprotasov044/Rotating-Detonation-Laboratory/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/aprotasov044/Rotating-Detonation-Laboratory/actions/workflows/tests.yml)
+
 Sizing and analysis codes used by the Rotating Detonation Laboratory, a
 student-led research group at ERAU Daytona Beach focused on hardware R&D of
 rotating detonation engines.
