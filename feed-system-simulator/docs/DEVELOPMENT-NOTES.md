@@ -387,6 +387,31 @@ For continued work on *this* machine specifically, the local
 .\.venv\Scripts\python.exe -m pip install pytest
 ```
 
+---
+
+## 12. CI
+
+Added `.github/workflows/tests.yml`: runs the full suite on every PR into
+`main` and on direct pushes to it, across Ubuntu (3.11, 3.12) and Windows
+(3.12).
+
+The Windows leg is a genuine test of the §11 hypothesis above, on a clean
+runner with none of this machine's accumulated conda/Visual-Studio history —
+if a bare `pip install PySide6` fails there too, that §11 conclusion was
+wrong and needs revisiting. If it passes (expected), it's independent
+confirmation the DLL issue really was specific to one machine.
+
+The Linux legs need `tlambert03/setup-qt-libs` to install Qt's runtime shared
+libraries (libEGL, libxkbcommon, etc.) before PySide6 will import at all on a
+bare `ubuntu-latest` runner. Worth noting precisely because it looks similar
+to the Windows DLL issue but isn't the same thing: this one is "the shared
+libraries genuinely are not installed," not a version conflict between
+competing copies. `pytest.importorskip("PySide6")` in `test_gui.py` does not
+help here — it only catches `PySide6` not being *installed*, and the failure
+mode in both cases is one import deeper than that, at
+`from PySide6.QtCore import QPointF`, where the compiled extension tries to
+load its native Qt libraries and collection errors out uncaught.
+
 If you hit the identical `DLL load failed ... QtCore` error on a different
 machine, it is very unlikely to be this same cause unless that machine also
 has a similarly long, overlapping history of conda/VS installs. Worth trying
