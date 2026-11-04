@@ -75,6 +75,12 @@ class PropertyPanel(QScrollArea):
             item = self._layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Taking a widget out of the layout stops the layout from
+                # positioning it, but does not itself hide it or reparent it
+                # away -- deleteLater()'s actual destruction is deferred to
+                # the next event loop iteration, so without this the old
+                # widget keeps rendering at its last position until then.
+                widget.hide()
                 widget.deleteLater()
 
     def _group(self, title: str) -> QFormLayout:
@@ -369,6 +375,7 @@ class PropertyPanel(QScrollArea):
             comp.inlet_max_psig = part.inlet_max_psig
             comp.outlet_min_psig = part.outlet_min_psig
             comp.outlet_max_psig = part.outlet_max_psig
+            comp.outlet_droop_psi = part.outlet_droop_psi
             self.show_object(comp)
             self._notify()
 
@@ -456,3 +463,25 @@ class PropertyPanel(QScrollArea):
         note.setWordWrap(True)
         note.setStyleSheet("color: #6b7383; font-size: 10px;")
         form.addRow(note)
+
+        droop = _spin(
+            comp.outlet_droop_psi, maximum=1e4, decimals=2, suffix=" psi"
+        )
+        droop.valueChanged.connect(
+            lambda v: (
+                setattr(comp, "outlet_droop_psi", v if v > 0 else None),
+                self._notify(),
+            )
+        )
+        form.addRow("Outlet droop at full flow", droop)
+
+        droop_note = QLabel(
+            "0 means an ideal regulator: holds setpoint exactly until this "
+            "regulator's own Cv genuinely can't keep up. A real regulator's "
+            "outlet droops progressively well before that -- enter the "
+            "manufacturer's droop/regulation spec here (often quoted as "
+            "psi droop at rated flow) to model that instead."
+        )
+        droop_note.setWordWrap(True)
+        droop_note.setStyleSheet("color: #6b7383; font-size: 10px;")
+        form.addRow(droop_note)

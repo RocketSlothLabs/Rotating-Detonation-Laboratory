@@ -124,9 +124,13 @@ splits, merges and parallel paths all fall out of the same residual.
 - **Backward**: engine pressure *and* ṁ pinned → the supply pressure that
   requires. `Run -> Size a regulator` targets a named regulator's outlet
   instead of the supply node.
-- **Regulators** hold their outlet setpoint, clamped by their own Cv. If they
-  cannot pass the demanded flow they are reported as saturated and re-solved as
-  a plain restriction.
+- **Regulators** hold their outlet setpoint by default, clamped by their own
+  Cv. If they cannot pass the demanded flow they are reported as saturated
+  and re-solved as a plain restriction. Set `outlet_droop_psi` from a
+  manufacturer's droop/regulation spec for a continuous droop curve instead
+  of that binary switch: outlet pressure droops linearly with flow up to the
+  regulator's own rated (fully open) capacity, then smoothly becomes the same
+  plain-restriction behaviour as the binary model's saturated case.
 
 Transients integrate only vessel state; the rest of the network is solved
 quasi-statically at each step (line volume is negligible next to vessel volume).

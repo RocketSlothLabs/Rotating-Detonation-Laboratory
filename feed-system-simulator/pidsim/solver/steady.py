@@ -187,12 +187,23 @@ class _Problem:
         ]
 
     def _regulated_nodes(self) -> dict[str, float]:
-        """Outlet nodes held at a setpoint by an active regulator."""
+        """Outlet nodes held at a literal, fixed setpoint by an active,
+        non-drooping regulator.
+
+        A regulator with droop data is deliberately excluded here: its
+        outlet pressure is not a fixed value, it is implied by a continuous
+        mdot-vs-pressure relationship evaluated in ``component_mdot`` (see
+        ``_regulator_mdot_with_droop``), so that node is left to fall through
+        to the normal unknown-pressure-with-a-mass-balance-equation path
+        every plain junction already gets.
+        """
         held: dict[str, float] = {}
         for comp in self._active_components():
             if not comp.is_regulator or comp.id in self.saturated_regulators:
                 continue
             if not comp.is_open or comp.outlet_setpoint_psia is None:
+                continue
+            if comp.outlet_droop_psi is not None and comp.outlet_droop_psi > 0.0:
                 continue
             if comp.to_node == self.boundary_node_id:
                 continue  # that pressure is the thing we are solving for
@@ -312,11 +323,18 @@ class _Problem:
             return 0.0
 
         if comp.is_regulator and comp.outlet_setpoint_psia is not None:
+            if comp.outlet_droop_psi is not None and comp.outlet_droop_psi > 0.0:
+                # Droop-aware: pb is this node's current solver iterate, not
+                # a fixed target, and this edge's own mass-balance equation
+                # (handled the same as any junction) is what drives the
+                # solver toward a self-consistent (P2, mdot) pair.
+                return self._regulator_mdot_with_droop(comp, pa, pb)
             if comp.id not in self.saturated_regulators:
-                # An unsaturated regulator holds its outlet node; the flow it
-                # passes is set by the rest of the network, not by this edge.
-                # Returning the Cv-limited value here would double-count, so
-                # the outlet node is a fixed boundary and carries no equation.
+                # An unsaturated, non-drooping regulator holds its outlet
+                # node; the flow it passes is set by the rest of the network,
+                # not by this edge. Returning the Cv-limited value here would
+                # double-count, so the outlet node is a fixed boundary and
+                # carries no equation.
                 return mass_flow(
                     cv,
                     pa,
@@ -335,6 +353,68 @@ class _Problem:
         return -mass_flow(
             cv, pb, pa, self.gas, self.node_temperature_R(comp.to_node), self.t_ref
         )
+
+    def regulator_rated_mdot(self, comp: FlowComponent, pa: float) -> float:
+        """Mass flow a drooping regulator passes once fully open (its own
+        Cv, from inlet pressure ``pa`` down to the full-droop outlet
+        pressure ``setpoint - outlet_droop_psi``). This is the "rated flow"
+        a droop spec is quoted against, derived from the regulator's own Cv
+        rather than needing a separate field for it. Also used outside the
+        solve to report whether a drooping regulator ended up beyond its
+        rated capacity.
+        """
+        p2_full_open = comp.outlet_setpoint_psia - comp.outlet_droop_psi
+        return mass_flow(
+            comp.effective_cv(),
+            pa,
+            max(p2_full_open, _MIN_PSIA),
+            self.gas,
+            self.node_temperature_R(comp.from_node),
+            self.t_ref,
+        )
+
+    def _regulator_mdot_with_droop(
+        self, comp: FlowComponent, pa: float, pb: float
+    ) -> float:
+        """Continuous mass flow for a regulator with a droop spec, as a
+        function of its *current* outlet pressure ``pb`` (a solver unknown
+        here, not a fixed target).
+
+        Three segments, continuous by construction (not smooth -- there is a
+        derivative kink at the knee, the same kind of acceptable
+        non-smoothness the plain Cv equation already has at its choked/
+        subsonic transition):
+
+        * ``pb >= setpoint``: no flow is needed to hold setpoint; clamp to
+          zero rather than letting the linear formula go negative.
+        * ``setpoint - droop <= pb < setpoint``: within the regulator's
+          normal regulating range, pressure droops linearly with flow --
+          ``mdot = rated * (setpoint - pb) / droop``. At ``pb = setpoint``
+          this is exactly 0; at ``pb = setpoint - droop`` it is exactly
+          ``rated`` by construction, matching the next segment exactly at
+          that boundary.
+        * ``pb < setpoint - droop``: beyond the regulator's own capacity --
+          it is wide open, so it simply behaves as a plain Cv restriction
+          between the real ``pa`` and ``pb``, no different from the existing
+          fully-saturated behaviour for a non-drooping regulator.
+        """
+        setpoint = comp.outlet_setpoint_psia
+        droop = comp.outlet_droop_psi
+        full_open_p2 = setpoint - droop
+
+        if pb >= setpoint:
+            return 0.0
+        if pb <= full_open_p2:
+            return mass_flow(
+                comp.effective_cv(self.time),
+                pa,
+                pb,
+                self.gas,
+                self.node_temperature_R(comp.from_node),
+                self.t_ref,
+            )
+        rated = self.regulator_rated_mdot(comp, pa)
+        return rated * (setpoint - pb) / droop
 
     def residuals(self, x: np.ndarray) -> np.ndarray:
         p = self.pressures(x)
@@ -486,7 +566,16 @@ def _solve_once(
 
 def _check_regulators(problem: _Problem, pressures: dict[str, float]) -> bool:
     """Flag regulators that cannot hold their setpoint. Returns True if any
-    newly saturated, meaning the solve must be repeated."""
+    *non-drooping* regulator newly saturated, meaning the solve must be
+    repeated with it reclassified as a plain restriction.
+
+    A drooping regulator never sets ``changed`` here: its continuous
+    mdot-vs-pressure relationship (``_Problem._regulator_mdot_with_droop``)
+    already reaches a self-consistent answer within a single solve, droop and
+    full-saturation alike, so there is nothing for an outer re-solve loop to
+    correct. It still gets the same diagnostic warnings, just never the
+    pin/saturate mode switch that only makes sense for an ideal regulator.
+    """
     changed = False
     for comp in problem._active_components():
         if not comp.is_regulator or comp.id in problem.saturated_regulators:
@@ -497,40 +586,56 @@ def _check_regulators(problem: _Problem, pressures: dict[str, float]) -> bool:
         p_in = pressures.get(comp.from_node)
         if p_in is None:
             continue
+        drooping = comp.outlet_droop_psi is not None and comp.outlet_droop_psi > 0.0
 
         if p_in <= setpoint:
-            problem.saturated_regulators.add(comp.id)
             problem.warnings.append(
                 f"{comp.name!r}: inlet {psia_to_psig(p_in):.1f} psig is at or below "
                 f"its {comp.outlet_setpoint_psig:.1f} psig setpoint; it cannot "
                 "regulate and is modelled as a plain Cv restriction"
             )
-            changed = True
+            if not drooping:
+                problem.saturated_regulators.add(comp.id)
+                changed = True
             continue
 
-        demanded = 0.0
-        for other in problem.net.components_at(comp.to_node):
-            if other.id == comp.id or other.id in problem.excluded_components:
-                continue
-            mdot = problem.component_mdot(other, pressures)
-            demanded += mdot if other.from_node == comp.to_node else -mdot
+        if drooping:
+            p_out = pressures.get(comp.to_node)
+            if p_out is not None:
+                rated = problem.regulator_rated_mdot(comp, p_in)
+                actual = problem.component_mdot(comp, pressures)
+                if actual > rated * (1.0 + 1e-6):
+                    problem.warnings.append(
+                        f"{comp.name!r} is beyond its rated droop capacity: "
+                        f"{rated * 1e3:.1f} g/s at full droop "
+                        f"({comp.outlet_droop_psi:.1f} psi) but {actual * 1e3:.1f} g/s "
+                        "is demanded; now acting as a plain Cv restriction"
+                    )
+        else:
+            demanded = 0.0
+            for other in problem.net.components_at(comp.to_node):
+                if other.id == comp.id or other.id in problem.excluded_components:
+                    continue
+                mdot = problem.component_mdot(other, pressures)
+                demanded += mdot if other.from_node == comp.to_node else -mdot
 
-        capacity = mass_flow(
-            comp.effective_cv(),
-            p_in,
-            setpoint,
-            problem.gas,
-            problem.t_flow,
-            problem.t_ref,
-        )
-        if demanded > capacity * (1.0 + 1e-9):
-            problem.saturated_regulators.add(comp.id)
-            problem.warnings.append(
-                f"{comp.name!r} is flow-saturated: Cv={comp.effective_cv():g} passes "
-                f"{capacity * 1e3:.1f} g/s at its setpoint but {demanded * 1e3:.1f} g/s "
-                "is demanded; outlet pressure will droop below setpoint"
+            capacity = mass_flow(
+                comp.effective_cv(),
+                p_in,
+                setpoint,
+                problem.gas,
+                problem.t_flow,
+                problem.t_ref,
             )
-            changed = True
+            if demanded > capacity * (1.0 + 1e-9):
+                problem.saturated_regulators.add(comp.id)
+                problem.warnings.append(
+                    f"{comp.name!r} is flow-saturated: Cv={comp.effective_cv():g} "
+                    f"passes {capacity * 1e3:.1f} g/s at its setpoint but "
+                    f"{demanded * 1e3:.1f} g/s is demanded; outlet pressure will "
+                    "droop below setpoint"
+                )
+                changed = True
 
         if comp.inlet_min_psig is not None and psia_to_psig(p_in) < comp.inlet_min_psig:
             problem.warnings.append(

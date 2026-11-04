@@ -15,7 +15,7 @@ from pidsim.model import (
     SinkSpec,
 )
 from pidsim.solver.steady import SolveError, SolveMode, solve_steady
-from pidsim.units import psia_to_psig
+from pidsim.units import psia_to_psig, psig_to_psia
 
 TOL = 0.01
 MANIFOLD_PSIG = 150.0
@@ -254,14 +254,20 @@ def test_closed_valve_blocks_a_branch():
 # --- regulators ------------------------------------------------------------
 
 
-def regulated_network(setpoint_psig: float, reg_cv: float = 1.0) -> Network:
+def regulated_network(
+    setpoint_psig: float,
+    reg_cv: float = 1.0,
+    droop_psi: float | None = None,
+    chain_cv: float = 1.883,
+    supply_psig: float = 2000.0,
+) -> Network:
     net = Network(name="regulated")
     net.add_node(
         Node(
             kind=NodeKind.SOURCE,
             id="bottle",
             name="Bottle",
-            supply_pressure_psig=2000.0,
+            supply_pressure_psig=supply_psig,
         )
     )
     net.add_node(Node(kind=NodeKind.JUNCTION, id="reg_out", name="Regulator Outlet"))
@@ -282,9 +288,10 @@ def regulated_network(setpoint_psig: float, reg_cv: float = 1.0) -> Network:
         name="Matheson 3200",
         cv=reg_cv,
         outlet_setpoint_psig=setpoint_psig,
+        outlet_droop_psi=droop_psi,
     )
     net.add_component(reg)
-    net.add_component(_line(1.883, "reg_out", "engine", "chain"))
+    net.add_component(_line(chain_cv, "reg_out", "engine", "chain"))
     return net
 
 
@@ -305,6 +312,138 @@ def test_undersized_regulator_is_reported_as_saturated():
     assert any("saturated" in w for w in result.warnings)
     # Having drooped, the outlet now sits below the setpoint.
     assert psia_to_psig(result.node_pressures_psia["reg_out"]) < 400.0
+
+
+# --- regulator droop ---------------------------------------------------
+#
+# Without outlet_droop_psi (every test above), a regulator either holds its
+# setpoint exactly or -- once its own Cv genuinely can't keep up -- is
+# reclassified as a plain restriction, with a hard switch between the two.
+# A real regulator's outlet pressure droops *progressively* as demand rises,
+# well before it is fully open; these tests exercise that continuous model.
+
+
+def test_droop_is_negligible_at_low_demand():
+    """Small flow relative to rated capacity: outlet stays close to setpoint,
+    the same way a real lightly-loaded regulator would."""
+    net = regulated_network(
+        setpoint_psig=400.0, reg_cv=5.0, droop_psi=20.0, chain_cv=0.05
+    )
+    result = solve_steady(net, ch4_settings(), SolveMode.FORWARD)
+    assert result.converged
+    assert psia_to_psig(result.node_pressures_psia["reg_out"]) == pytest.approx(
+        400.0, abs=1.0
+    )
+
+
+def test_droop_increases_with_demand():
+    """More downstream Cv pulls more flow through the same regulator, which
+    should droop the outlet pressure further -- a monotonic relationship."""
+    light = solve_steady(
+        regulated_network(400.0, reg_cv=5.0, droop_psi=20.0, chain_cv=0.3),
+        ch4_settings(),
+        SolveMode.FORWARD,
+    )
+    heavy = solve_steady(
+        regulated_network(400.0, reg_cv=5.0, droop_psi=20.0, chain_cv=1.883),
+        ch4_settings(),
+        SolveMode.FORWARD,
+    )
+    light_p = light.node_pressures_psia["reg_out"]
+    heavy_p = heavy.node_pressures_psia["reg_out"]
+    assert heavy_p < light_p < psig_to_psia(400.0)
+
+
+def test_droop_matches_the_linear_formula_exactly():
+    """The solver's own (p_in, p_out, mdot) for the regulator must satisfy
+    the droop law exactly, not just produce some self-consistent-looking
+    answer -- cross-checked against the physics functions directly, the same
+    way the junction-temperature tests validated their own fix."""
+    from pidsim.physics.flow import mass_flow
+    from pidsim.physics.gases import get_gas
+
+    droop = 20.0
+    net = regulated_network(
+        setpoint_psig=400.0, reg_cv=5.0, droop_psi=droop, chain_cv=0.6
+    )
+    result = solve_steady(net, ch4_settings(), SolveMode.FORWARD)
+    assert result.converged
+
+    p_in = result.node_pressures_psia["bottle"]
+    p_out = result.node_pressures_psia["reg_out"]
+    actual_mdot = result.component_flows["reg"].mdot_kgs
+    setpoint_psia = psig_to_psia(400.0)
+
+    assert p_out < setpoint_psia  # genuinely drooping, not pinned
+    assert p_out > setpoint_psia - droop  # within the droop band, not saturated
+
+    gas = get_gas("CH4")
+    rated = mass_flow(5.0, p_in, setpoint_psia - droop, gas, 530.0, 530.0)
+    expected_mdot = rated * (setpoint_psia - p_out) / droop
+    assert actual_mdot == pytest.approx(expected_mdot, rel=1e-5)
+
+
+def test_droop_beyond_rated_capacity_falls_back_to_plain_restriction():
+    """Demand so high even a fully-open regulator can't supply it: outlet
+    drops below the full-droop floor, the solver still converges in one
+    pass, and the new (not the old binary) warning explains why.
+
+    Needs a lower supply pressure than the other droop tests: with a 2000
+    psig bottle, this test's setpoint/droop band already sits past the
+    choke point, where flow is capped at its maximum by definition and can
+    never exceed "rated" no matter how much downstream demand increases --
+    there would be no "beyond rated" regime left to reach. A 500 psig
+    supply keeps the whole droop band subsonic, where flow can still rise
+    as pressure drops further below the nominal full-open point.
+    """
+    net = regulated_network(
+        setpoint_psig=400.0,
+        reg_cv=5.0,
+        droop_psi=5.0,
+        chain_cv=50.0,
+        supply_psig=500.0,
+    )
+    result = solve_steady(net, ch4_settings(), SolveMode.FORWARD)
+    assert result.converged
+
+    p_out = result.node_pressures_psia["reg_out"]
+    assert p_out < psig_to_psia(400.0) - 5.0  # past the full-droop floor
+
+    assert any("beyond its rated droop capacity" in w for w in result.warnings)
+    # The old binary-model message is specific to non-drooping regulators and
+    # must not appear here.
+    assert not any("is flow-saturated" in w for w in result.warnings)
+
+
+def test_droop_does_not_need_a_re_solve():
+    """A drooping regulator's continuous relationship should reach the
+    answer within the solver's normal iteration count, not the bounded
+    regulator-re-solve loop a binary-mode saturation switch needs."""
+    net = regulated_network(
+        setpoint_psig=400.0,
+        reg_cv=5.0,
+        droop_psi=5.0,
+        chain_cv=50.0,
+        supply_psig=500.0,
+    )
+    result = solve_steady(net, ch4_settings(), SolveMode.FORWARD)
+    assert result.converged
+    assert result.iterations < 50  # generous; a re-solve loop would be far more
+
+
+def test_droop_field_is_ignored_when_sizing_a_regulator_backward():
+    """A regulator can carry droop data and still be sized by backward mode
+    (its setpoint cleared beforehand, matching that workflow) without the
+    droop field changing anything -- the branch that uses it is gated on
+    outlet_setpoint_psia being set, which backward sizing explicitly clears."""
+    net = regulated_network(setpoint_psig=400.0, droop_psi=5.0)
+    net.components["reg"].outlet_setpoint_psig = None
+    net.nodes["engine"].sink_spec = SinkSpec.BOTH
+    net.nodes["engine"].target_mdot_kgs = 0.060
+
+    result = solve_steady(net, ch4_settings(), SolveMode.BACKWARD, solve_for="reg")
+    assert result.converged
+    assert result.solved_boundary_psia == pytest.approx(197.2, rel=TOL)
 
 
 def test_backward_can_size_a_named_regulator():

@@ -494,3 +494,84 @@ cases exercise (vessel -> junction -> a second component), added as
   itself rather than silently falling back to the project default (the same
   root cause, just for a source instead of a junction)
 - both branches leaving a tee agree with the tee's own propagated temperature
+
+---
+
+## 14. Regulator droop
+
+The old regulator model was binary: a regulator either held its outlet
+setpoint exactly, or -- once its own Cv genuinely couldn't keep up -- was
+flagged saturated and re-solved as a plain restriction. Both ends of that are
+physically correct limits (a lightly-loaded regulator really does hold
+setpoint almost exactly; a fully-open one really is just an orifice), but a
+real regulator's outlet droops *progressively* as demand rises well before it
+is fully open, which the binary switch skipped entirely.
+
+### Design: reuse `cv`, add one field
+
+Rather than a disconnected "droop slope" in made-up units, the new
+`outlet_droop_psi` field is defined as *the pressure droop at the
+regulator's own rated (fully open) capacity* -- a single number from a
+manufacturer's droop/regulation spec. "Rated capacity" itself needs no new
+field: it is just the regulator's own `cv`, evaluated via the normal Cv
+equation from the current inlet pressure down to `setpoint - outlet_droop_
+psi`. That reuses `cv` for the same physical meaning it already had (the
+fully-open orifice size), rather than introducing a second, disconnected
+notion of "capacity."
+
+Three segments as a function of the regulator's *current* outlet pressure,
+continuous by construction, not smooth (the same acceptable kind of
+non-smoothness the plain Cv equation already has at its choked/subsonic
+transition):
+
+- at or above setpoint: no flow needed, clamp to zero
+- within the droop band: linear, `mdot = rated * (setpoint - P2) / droop`
+- below the full-droop floor: wide open, reverts to the ordinary Cv equation
+  between the real inlet and outlet pressures -- exactly the existing
+  saturated-regulator behaviour, now reached as this curve's natural
+  endpoint instead of a separate code path
+
+### Why this didn't need new solver architecture
+
+A non-drooping regulator's outlet node is pinned to a *fixed* pressure
+(`self.fixed`), with a separate `saturated_regulators` set and an outer
+re-solve loop (`_check_regulators`) to flip it to the unregulated path when
+needed. A drooping regulator's outlet needs none of that: it is simply left
+to fall through to the same unknown-pressure-with-a-mass-balance-equation
+path every plain junction already gets, and `component_mdot` evaluates the
+droop formula above *as a function of that node's current solver iterate*
+instead of a fixed target. The existing nodal solver finds the
+self-consistent (P2, mdot) pair the same way it finds any junction's
+pressure -- droop and full saturation alike, within one solve, no outer loop.
+
+### A test design mistake worth recording
+
+The first version of the "beyond rated capacity" test used the same 2000
+psig bottle as the other regulator tests, with a 400 psig setpoint. It failed
+-- not because the implementation was wrong, but because the test's own
+numbers put the regulator's "rated" reference point already *past the choke
+point* (downstream of half the inlet pressure). Once choked, flow is capped
+at its maximum by definition and literally cannot exceed "rated" no matter
+how much downstream demand increases -- there was no "beyond rated" regime
+left for the test to reach. Fixed by lowering the test's supply pressure so
+the whole droop band stays subsonic, where flow can still rise as pressure
+drops further. Left as `supply_psig` on the `regulated_network()` test
+helper. Worth remembering for anyone adding more droop tests: check where the
+choke point sits relative to the setpoint and droop band before assuming a
+given demand level will produce the behaviour you expect.
+
+### A GUI bug found while rendering the new field to check it
+
+Rendering the regulator property panel to confirm the new field looked right
+turned up a real, pre-existing bug: switching from one selected object to
+another left the *previous* object's form visibly overlapping the new one.
+`PropertyPanel._clear()` removed old widgets from the layout via `takeAt()`
+and scheduled `deleteLater()`, but `deleteLater()`'s actual destruction is
+deferred to the next event loop iteration -- and taking a widget out of a
+layout does not itself hide it. In a continuously-running real application
+this gap is normally a single event loop iteration, likely never visibly
+perceptible, but a one-line fix (`widget.hide()` before `deleteLater()`) is
+the standard, correct way to avoid relying on that timing at all. Confirmed
+with a regression test using `isHidden()`, not `isVisible()` --
+`isVisible()` depends on the entire ancestor chain being shown, which it
+never is in a headless test, so it cannot distinguish the fix from the bug.
