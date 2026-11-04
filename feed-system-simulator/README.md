@@ -165,11 +165,12 @@ three gives **0.923** — the two values the reference cases use.
 - **Steady-state runs are isothermal** at the project flowing temperature, as
   the validated reference model is. Temperature is a state variable only in
   transient runs.
-- **Junction temperatures do not track the gas** passing through them during a
-  transient. Vessels carry their own cooling temperature and the Cv equation
-  uses the upstream node's temperature, but a plain junction stays at the
-  project temperature. The reference cases discharge straight into a fixed
-  manifold, so they are unaffected.
+- **Gas does not cool gradually along a line's own length.** Transient
+  junction temperatures track the mass-weighted average of whatever is
+  flowing in at that instant (so a junction downstream of a cooling
+  accumulator correctly reports cooler gas, not a flat project default), but
+  lines carry no volume or thermal mass, so temperature changes in discrete
+  steps at each node rather than continuously along a run.
 - Reverse flow through a component uses a single temperature for both
   directions.
 

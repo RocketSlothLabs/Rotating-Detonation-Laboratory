@@ -263,15 +263,10 @@ Read this before trusting a result.
 - **Steady-state is isothermal** at the project flowing temperature, matching
   the validated reference model. Temperature is a state variable only in
   transient runs. See §7 for why this is correct, not a shortcut.
-- **Junction temperatures do not track the gas.** Vessels carry their own
-  cooling temperature and the Cv equation uses the upstream node's temperature,
-  but a plain junction stays at the project temperature. The reference cases
-  discharge a vessel straight into a fixed manifold so they are exact; a long
-  branched line downstream of a blowing-down accumulator would read slightly
-  warm. **This is the most valuable next improvement** — propagating stagnation
-  temperature through the network is the physically correct meaning of adiabatic
-  here, is provably a no-op for all five reference cases, and closes the only
-  temperature gap that actually costs accuracy.
+- ~~Junction temperatures do not track the gas~~ -- fixed, see §13. Gas still
+  does not cool *gradually along a line's own length* between two nodes;
+  lines carry no volume or thermal mass here, so that would need a different
+  kind of model, not an extension of this one.
 - **Reverse flow uses a single temperature for both directions.**
 - A choked feed's flow is set entirely upstream, so forward mode with a mass
   flow target is genuinely over-determined, not a numerical failure. The solver
@@ -417,3 +412,85 @@ machine, it is very unlikely to be this same cause unless that machine also
 has a similarly long, overlapping history of conda/VS installs. Worth trying
 first: update the Microsoft Visual C++ Redistributable, and/or
 `pip install --force-reinstall PySide6`.
+
+---
+
+## 13. Junction temperature propagation
+
+Closed the gap §9 called "the most valuable next improvement": a junction
+downstream of a cooling accumulator used to report the flat project default
+temperature, and -- the part that actually cost accuracy, not just display --
+the Cv equation for whatever component came *after* that junction was
+evaluated at that wrong, flat temperature instead of the gas that had
+actually arrived.
+
+### What changed
+
+`transient.py` gained `_propagate_node_temperatures`: a small worklist
+algorithm that spreads known temperatures (sources at their own
+`supply_temperature_R`, vessels at their own ODE-decoded temperature) through
+the current flow solution. A node resolves once every component actually
+flowing *into* it traces back to an already-known node, and becomes that
+mass-weighted average -- the same calculation the vessel energy balance
+already needed for its own inflow enthalpy term (`inflow_temperature_K`),
+generalised to every node instead of just vessels. A node with no inflow at
+all defaults to the project flowing temperature, matching the old behaviour
+exactly in that case.
+
+This is deliberately *not* a continuous temperature field along a line's
+length -- lines still carry no volume or thermal mass, consistent with the
+quasi-steady assumption the whole transient solver already rests on (see the
+module docstring). Temperature changes in discrete steps at each node, never
+gradually along a run. Extending to a continuous field would be a materially
+bigger change (lines would need their own residence time and thermal state)
+for accuracy this project's reference cases give no way to validate against.
+
+### The one deliberate approximation: a one-evaluation lag
+
+Computing a junction's temperature needs the flow solution, but the flow
+solution (via the Cv equation) needs node temperatures -- so getting both
+exactly self-consistent at a single instant would mean solving pressures
+twice per RHS evaluation (once to get a flow solution, then again with
+corrected junction temperatures fed back in). That doubles the cost of every
+`solve_ivp` evaluation, of which there are many per run.
+
+Instead, each junction's temperature is seeded from the *previous*
+evaluation's result (`junction_temp_cache`, the same warm-start pattern
+already used for the pressure solve's initial guess) and only recomputed
+*after* the flow solve, to be used as next evaluation's input. In physical
+time this lag is a solver sub-step, not a user-visible output interval --
+`solve_ivp` calls the RHS many times between two points a user would ever
+actually see -- and the Cv equation's own sensitivity to temperature is weak
+(`Q ~ 1/sqrt(T)`), so the residual error this leaves is small by construction
+from two directions at once. Measured directly in
+`test_downstream_mass_flow_actually_uses_the_propagated_temperature`: about
+0.01% relative, against a project-default error of several percent for the
+same case -- two orders of magnitude apart, which is the actual argument for
+why a single pass is enough and a nested re-solve isn't worth its cost.
+
+### Verification
+
+All five reference cases discharge a vessel directly into a fixed manifold --
+no intermediate junction -- so this change is provably a no-op for every one
+of them, confirmed by `test_validation.py` and the case 4/5 transient tests
+passing unchanged. The new behaviour needed a topology none of the reference
+cases exercise (vessel -> junction -> a second component), added as
+`junction_network()` and seven tests in `test_transient.py`:
+
+- a junction with one inflow reports *exactly* that inflow's temperature
+  (mathematically exact for a one-term weighted average, not an
+  approximation -- asserted to `rtol=1e-9`)
+- it genuinely cools over the run rather than sitting flat
+- the component *after* the junction produces the mass flow the physics
+  functions predict at the junction's real temperature, measurably different
+  from what the old flat-default behaviour would have given
+- the sink (engine) itself now reports the temperature of gas actually
+  arriving -- new information this fix makes available, not just a
+  junction-specific detail
+- two inflows at genuinely different temperatures (a bypass straight from the
+  source, mixed with the accumulator's cooled discharge at the same junction)
+  produce the correct mass-weighted average, strictly between the two inputs
+- a source with a non-default `supply_temperature_R` is now reported as
+  itself rather than silently falling back to the project default (the same
+  root cause, just for a source instead of a junction)
+- both branches leaving a tee agree with the tee's own propagated temperature

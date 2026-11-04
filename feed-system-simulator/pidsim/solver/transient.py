@@ -25,15 +25,30 @@ the isentropic answer when the inflow happens to be zero. A valve closing
 mid-run therefore switches a branch from coupled to isolated *behaviour*
 without switching formulation.
 
-Known v1 limitation
--------------------
-Vessel nodes carry their own (cooling) temperature and the Cv equation is
-evaluated at the upstream node's temperature. Plain junctions, however, stay
-at the project flowing temperature rather than tracking the gas that passes
-through them. Gas genuinely cools as it expands down a line; modelling that
-would mean carrying a temperature field through the network and is out of
-scope for v1. The reference cases discharge a vessel straight into a fixed
-manifold, so they are unaffected.
+Node temperatures
+-----------------
+Vessels carry their own (cooling) temperature as ODE state. Sources sit at
+their own ``supply_temperature_R``, fixed. Everything else -- junctions,
+tees, the sink -- has no thermal state of its own, so its temperature is just
+the mass-weighted average of whatever is flowing into it *this instant*
+(:func:`_propagate_node_temperatures`): the same calculation the vessel
+energy balance already needed for its own inflow enthalpy term, generalised
+to every node. A junction downstream of a cooling accumulator therefore
+reports, and feeds into, the gas temperature actually arriving there, not a
+flat project default.
+
+That calculation needs this instant's flow solution, which needs node
+temperatures to evaluate the Cv equation -- so each junction's temperature
+necessarily lags the flow solve that used it by one evaluation, seeded from
+the previous call via ``junction_temp_cache``. In practice this lag is a
+solver sub-step, not a user-visible time step, and the Cv equation's
+dependence on temperature is weak (``Q ~ 1/sqrt(T)``), so a single pass per
+evaluation is accurate enough without a nested re-solve.
+
+What this does *not* model: gas cooling continuously *along* a line's own
+length between its two endpoints. Lines carry no volume or thermal mass here
+(see the quasi-steady assumption above), so temperature only changes in
+discrete steps at each node, never gradually along a run.
 """
 
 from __future__ import annotations
@@ -154,6 +169,64 @@ def _resolve_model(net: Network, node: Node) -> VesselModel:
     )
 
 
+def _propagate_node_temperatures(
+    network: Network,
+    flows: dict[str, float],
+    known_K: dict[str, float],
+    t_flow_R: float,
+) -> dict[str, float]:
+    """Spread known temperatures (sources, vessels) through a flow solution.
+
+    A node becomes resolvable once every component actually flowing *into* it
+    (by the sign of ``flows`` this instant) traces back to an already-known
+    node; its temperature is then the mass-weighted average of those inflows.
+    Worked as a worklist rather than a single rooted walk because the network
+    can have more than one source and because a branch that splits and merges
+    back means a node's inflows don't all trace to the same upstream path.
+
+    A node with no positive inflow at all -- a dead leg, or nothing has
+    reached it yet -- resolves immediately to ``t_flow_R``, so it can never
+    block another node's resolution. Any node that somehow never resolves
+    (only possible if the flow solution itself contains a genuine cycle,
+    which the model's topology rules out) gets the same fallback rather than
+    looping forever.
+    """
+    temps = dict(known_K)
+    pending = set(network.nodes) - set(temps)
+    progressed = True
+    while pending and progressed:
+        progressed = False
+        for node_id in list(pending):
+            total = 0.0
+            weighted = 0.0
+            ready = True
+            for comp in network.components_at(node_id):
+                signed = flows.get(comp.id, 0.0)
+                into = signed if comp.to_node == node_id else -signed
+                if into <= 0.0:
+                    continue
+                upstream = (
+                    comp.from_node if comp.to_node == node_id else comp.to_node
+                )
+                if upstream not in temps:
+                    ready = False
+                    break
+                weighted += into * temps[upstream]
+                total += into
+            if not ready:
+                continue
+            temps[node_id] = (
+                weighted / total if total > 0.0 else rankine_to_kelvin(t_flow_R)
+            )
+            pending.discard(node_id)
+            progressed = True
+
+    fallback = rankine_to_kelvin(t_flow_R)
+    for node_id in pending:
+        temps[node_id] = fallback
+    return temps
+
+
 def solve_transient(
     network: Network,
     settings: ProjectSettings,
@@ -190,11 +263,15 @@ def solve_transient(
         offset += state.size
 
     warm: dict[str, float] = {}
+    junction_temp_cache: dict[str, float] = {}
 
     def snapshot(t: float, y: np.ndarray):
         """Vessel states plus the quasi-steady solution of everything else."""
         fixed: dict[str, float] = {}
-        temps_R: dict[str, float] = {}
+        # Seed from last call's propagated junction temperatures (the one-
+        # evaluation lag described in the module docstring); vessel temps
+        # below always override since they're authoritative for this instant.
+        temps_R: dict[str, float] = dict(junction_temp_cache)
         temps_K: dict[str, float] = {}
         for st in states:
             p, t_k = st.decode(y)
@@ -205,6 +282,18 @@ def solve_transient(
             network, settings, t, fixed, warm or None, temps_R
         )
         warm.update(pressures)
+
+        known = dict(temps_K)
+        for node in network.nodes.values():
+            if node.kind is NodeKind.SOURCE and node.id not in known:
+                known[node.id] = rankine_to_kelvin(node.supply_temperature_R)
+        temps_K = _propagate_node_temperatures(
+            network, flows, known, settings.t_flow_R
+        )
+        junction_temp_cache.clear()
+        junction_temp_cache.update(
+            {nid: kelvin_to_rankine(t) for nid, t in temps_K.items()}
+        )
         return pressures, flows, temps_K
 
     def vessel_balance(
@@ -229,7 +318,10 @@ def solve_transient(
         """Mass-weighted temperature of everything entering the vessel.
 
         Normally this is just the supply temperature; the weighting matters
-        only when one vessel feeds another.
+        only when one vessel feeds another. ``temps_K`` is always complete by
+        the time this runs -- snapshot() has already propagated it to every
+        node, sources included -- so each upstream lookup is a direct hit,
+        never a fallback.
         """
         total = 0.0
         weighted = 0.0
@@ -241,15 +333,7 @@ def solve_transient(
             upstream = (
                 comp.from_node if comp.to_node == state.node_id else comp.to_node
             )
-            t_up = temps_K.get(
-                upstream,
-                rankine_to_kelvin(
-                    network.nodes[upstream].supply_temperature_R
-                    if network.nodes[upstream].kind is NodeKind.SOURCE
-                    else settings.t_flow_R
-                ),
-            )
-            weighted += into * t_up
+            weighted += into * temps_K[upstream]
             total += into
         if total <= 0.0:
             return rankine_to_kelvin(settings.t_flow_R)
@@ -308,6 +392,7 @@ def solve_transient(
     comp_m: dict[str, np.ndarray] = {c: np.zeros(n_output) for c in network.components}
 
     warm.clear()
+    junction_temp_cache.clear()
     for i, ti in enumerate(t_out):
         y = sol.sol(ti)
         pressures, flows, temps_K = snapshot(ti, y)

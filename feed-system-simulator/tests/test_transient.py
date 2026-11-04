@@ -259,6 +259,167 @@ def test_accumulator_feeding_two_branches():
     assert b1 > b2  # uneven split, as the differing Cv requires
 
 
+# --- junction temperature propagation ---------------------------------------
+#
+# A plain junction has no thermal state of its own; its temperature should be
+# the mass-weighted average of whatever is flowing into it right now, not a
+# flat project default. These tests build a vessel -> junction -> engine
+# chain (not in any reference case, which all go vessel -> engine directly)
+# specifically to exercise the gap this fixes.
+
+
+def junction_network(model: VesselModel = VesselModel.AUTO) -> Network:
+    """Isolated accumulator discharging through an intermediate junction."""
+    net = isolated_network(model)
+    net.add_node(Node(kind=NodeKind.JUNCTION, id="mid", name="Midpoint"))
+    net.remove_component("discharge")
+    # Generous Cv: negligible pressure drop, so this test isolates the
+    # temperature question from any pressure-drop complication.
+    net.add_component(_line(5.0, "acc", "mid", "leg1"))
+    net.add_component(_line(0.732, "mid", "engine", "leg2"))
+    return net
+
+
+def test_junction_temperature_tracks_a_single_cooling_inflow_exactly():
+    """One inflow: the mass-weighted average is exactly that inflow's value,
+    not an approximation -- and it must actually move, not sit flat."""
+    result = solve_transient(junction_network(), o2_settings(), (0.0, 1.0))
+    acc_temp = result.node_temperatures_K["acc"]
+    mid_temp = result.node_temperatures_K["mid"]
+
+    np.testing.assert_allclose(mid_temp, acc_temp, rtol=1e-9)
+    assert mid_temp[0] == pytest.approx(294.44, abs=0.1)  # 530 degR at t=0
+    # Case 4's isentropic relation predicts ~31 K of cooling by t=1s
+    # (T2 = T1*(P2/P1)**0.2857 with the reference case's own numbers); this
+    # just needs to be clearly more than zero, not flat.
+    assert mid_temp[-1] < mid_temp[0] - 20.0
+
+
+def test_junction_temperature_matches_reference_case_4_through_an_extra_hop():
+    """Same vessel/discharge Cv as reference case 4, just split across two
+    components with a junction in between. The junction's pressure and
+    temperature at t=1s should match case 4's accumulator state directly,
+    since the inserted leg1 is sized to be nearly lossless."""
+    result = solve_transient(junction_network(), o2_settings(), (0.0, 1.0))
+    snap = result.at(1.0)
+    assert psia_to_psig(snap["node_pressure_psia"]["mid"]) == pytest.approx(
+        331.4, rel=TOL
+    )
+    assert snap["node_temperature_K"]["mid"] == pytest.approx(
+        snap["node_temperature_K"]["acc"], rel=1e-6
+    )
+
+
+def test_downstream_mass_flow_actually_uses_the_propagated_temperature():
+    """Not just a reporting change: prove the Cv equation for the component
+    *past* the junction is evaluated at the junction's real (cooled)
+    temperature, not the flat project default -- by cross-checking the
+    solver's own answer against the physics function directly, and showing
+    the project-default answer would have been measurably different."""
+    from pidsim.physics.flow import mass_flow
+    from pidsim.physics.gases import get_gas
+    from pidsim.units import kelvin_to_rankine
+
+    result = solve_transient(junction_network(), o2_settings(), (0.0, 1.0))
+    snap = result.at(1.0)
+
+    mid_p = snap["node_pressure_psia"]["mid"]
+    mid_t_R = kelvin_to_rankine(snap["node_temperature_K"]["mid"])
+    engine_p = snap["node_pressure_psia"]["engine"]
+    actual_mdot = snap["component_mdot_kgs"]["leg2"]
+
+    gas = get_gas("O2")
+    correct = mass_flow(0.732, mid_p, engine_p, gas, mid_t_R, 530.0)
+    naive_at_project_default = mass_flow(0.732, mid_p, engine_p, gas, 530.0, 530.0)
+
+    # Within ~0.5%, not exact: the Cv equation that produced actual_mdot used
+    # the *previous* evaluation's junction temperature (the one-evaluation
+    # lag documented in transient.py), while `correct` uses this exact
+    # sample's freshly propagated temperature. The gap this leaves is tiny
+    # (observed ~0.01%) -- which is itself evidence the lag is negligible,
+    # exactly as that design relies on.
+    assert actual_mdot == pytest.approx(correct, rel=5e-3)
+    # The junction has genuinely cooled by t=1s, so using the project default
+    # instead would have given a measurably different (and wrong) answer --
+    # two orders of magnitude bigger than the lag residual above.
+    assert actual_mdot != pytest.approx(naive_at_project_default, rel=0.02)
+
+
+def test_sink_temperature_reflects_the_gas_actually_arriving():
+    """The engine's own reported temperature should track the cooled gas
+    reaching it, not sit flat at project default -- new information this fix
+    makes available, not just a junction-specific detail."""
+    result = solve_transient(junction_network(), o2_settings(), (0.0, 1.0))
+    engine_temp = result.node_temperatures_K["engine"]
+    assert engine_temp[0] == pytest.approx(294.44, abs=0.1)
+    assert engine_temp[-1] < engine_temp[0] - 20.0
+
+
+def test_junction_mixes_two_inflows_at_different_temperatures():
+    """A junction fed both by a bypass straight from the (constant-
+    temperature) source and by the accumulator's (cooled) discharge should
+    report the mass-weighted average of the two -- strictly between them,
+    not equal to either -- within a single branching/merging source train."""
+    net = coupled_network()
+    net.add_node(Node(kind=NodeKind.JUNCTION, id="mid", name="Midpoint"))
+    net.remove_component("discharge")
+    net.add_component(_line(0.732, "acc", "mid", "acc_leg"))
+    net.add_component(_line(0.1, "supply", "mid", "bypass"))
+    net.add_component(_line(5.0, "mid", "engine", "outlet"))
+
+    result = solve_transient(net, o2_settings(), (0.0, 1.0))
+    snap = result.at(1.0)
+
+    acc_t = snap["node_temperature_K"]["acc"]
+    mid_t = snap["node_temperature_K"]["mid"]
+    source_t = 294.44  # 530 degR, the supply's own (unchanging) temperature
+
+    acc_mdot = snap["component_mdot_kgs"]["acc_leg"]
+    bypass_mdot = snap["component_mdot_kgs"]["bypass"]
+    assert acc_mdot > 0.0 and bypass_mdot > 0.0  # both legs genuinely flowing
+
+    # Strictly between the two inflow temperatures, not equal to either --
+    # proof this is a real mix, not one branch dominating or being ignored.
+    assert acc_t < mid_t < source_t
+
+    expected = (acc_mdot * acc_t + bypass_mdot * source_t) / (acc_mdot + bypass_mdot)
+    assert mid_t == pytest.approx(expected, rel=1e-3)
+
+
+def test_source_with_a_nondefault_temperature_is_reported_correctly():
+    """A source colder than the project flowing temperature should show up
+    as itself in the results, not silently fall back to the project default
+    -- the same underlying gap, just for a source rather than a junction."""
+    net = isolated_network()
+    net.nodes["supply"].supply_temperature_R = 450.0  # colder than project's 530
+
+    result = solve_transient(net, o2_settings(), (0.0, 0.1))
+    from pidsim.units import rankine_to_kelvin
+
+    assert result.node_temperatures_K["supply"][0] == pytest.approx(
+        rankine_to_kelvin(450.0), rel=1e-6
+    )
+
+
+def test_branches_off_a_junction_both_see_its_propagated_temperature():
+    """Extends the existing two-branch split test: both branches leaving the
+    tee should agree with the tee's own reported temperature, since they
+    share the same upstream node."""
+    net = isolated_network()
+    net.add_node(Node(kind=NodeKind.TEE, id="tee", name="Tee"))
+    net.remove_component("discharge")
+    net.add_component(_line(2.394, "acc", "tee", "main"))
+    net.add_component(_line(0.732, "tee", "engine", "b1"))
+    net.add_component(_line(0.366, "tee", "engine", "b2"))
+
+    result = solve_transient(net, o2_settings(), (0.0, 0.5))
+    snap = result.at(0.5)
+
+    tee_t = snap["node_temperature_K"]["tee"]
+    assert tee_t == pytest.approx(snap["node_temperature_K"]["acc"], rel=1e-6)
+    assert tee_t < 294.44 - 10.0  # genuinely cooled, not flat default
+
+
 # --- errors ----------------------------------------------------------------
 
 
