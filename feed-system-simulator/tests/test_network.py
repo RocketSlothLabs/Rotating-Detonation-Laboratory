@@ -198,6 +198,39 @@ def test_matheson_regulator_entry():
     assert reg.outlet_max_psig == 250.0
 
 
+def test_real_bom_parts_carry_manufacturer_identification():
+    """Three seeded Cv values -- ball valve, check valve, and the 3/4->3/8
+    reducer -- are tied to real parts the lab actually owns (RDL Master
+    Inventory items TB-055, TB-056, TB-053), confirmed against McMaster-
+    Carr's own published specifications rather than assumed.
+
+    The ball valve and check valve Cv values were already in this library,
+    originally derived from the validated reference cases rather than a
+    datasheet -- McMaster's spec table independently gives the same two
+    numbers, which is real cross-validation, not circular confirmation.
+    """
+    ball = get_part("ball_valve_075")
+    assert ball.manufacturer == "McMaster-Carr"
+    assert ball.part_number == "46325K29"
+    assert ball.max_pressure_psig == 800.0
+
+    check = get_part("check_valve_075_mm")
+    assert check.manufacturer == "McMaster-Carr"
+    assert check.part_number == "1874N18"
+    assert check.max_pressure_psig == 3000.0
+
+    reducer = get_part("reducer_075m_038f")
+    assert reducer.manufacturer == "McMaster-Carr"
+    assert reducer.part_number == "48805K749"
+    assert reducer.max_pressure_psig == 5300.0
+
+    # Identification carries through to an instantiated component, the same
+    # as it already does for the Matheson regulator.
+    comp = ball.instantiate("a", "b")
+    assert comp.manufacturer == "McMaster-Carr"
+    assert comp.part_number == "46325K29"
+
+
 def test_unknown_part_lists_alternatives():
     with pytest.raises(KeyError, match="Unknown part"):
         get_part("not_a_real_part")

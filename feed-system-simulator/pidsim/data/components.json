@@ -32,21 +32,27 @@
       "key": "ball_valve_075",
       "name": "3/4\" Ball Valve",
       "type": "ball_valve",
+      "manufacturer": "McMaster-Carr",
+      "part_number": "46325K29",
       "cv": 10.0,
-      "inlet_size": "3/4\" NPT",
-      "outlet_size": "3/4\" NPT",
+      "inlet_size": "3/4\" NPT F",
+      "outlet_size": "3/4\" NPT F",
       "connection_type": "NPT",
-      "max_pressure_psig": null
+      "max_pressure_psig": 800.0,
+      "notes": "316 SS, lockable lever handle. McMaster's own spec table lists Cv 10 @ 800 psi/100F -- confirms the value already used by the validated reference cases, not the other way around. RDL inventory item TB-055, qty 3 on hand."
     },
     {
       "key": "check_valve_075_mm",
       "name": "3/4\" Check Valve (M-M)",
       "type": "check_valve",
+      "manufacturer": "McMaster-Carr",
+      "part_number": "1874N18",
       "cv": 7.4,
       "inlet_size": "3/4\" NPT M",
       "outlet_size": "3/4\" NPT M",
       "connection_type": "NPT",
-      "max_pressure_psig": null
+      "max_pressure_psig": 3000.0,
+      "notes": "316 SS body, fluoroelastomer-sealed piston, 1 psi cracking pressure. McMaster's spec table lists Cv 7.4 @ 3000 psi/70F -- confirms the value already used by the validated reference cases. RDL inventory item TB-056, qty 6 on hand."
     },
     {
       "key": "adapter_075_ff",
@@ -62,11 +68,14 @@
       "key": "reducer_075m_038f",
       "name": "3/4\" M to 3/8\" F Reducer",
       "type": "reducer",
+      "manufacturer": "McMaster-Carr",
+      "part_number": "48805K749",
       "cv": 2.7,
       "inlet_size": "3/4\" NPT M",
       "outlet_size": "3/8\" NPT F",
       "connection_type": "NPT",
-      "max_pressure_psig": null
+      "max_pressure_psig": 5300.0,
+      "notes": "316 SS instrumentation-grade fitting, rolled threads. McMaster's spec table gives the 5300 psi/72F rating; it does not publish a Cv for this part, so 2.7 is retained from the validated reference cases rather than being independently confirmable here. RDL inventory item TB-053, qty 2 on hand."
     },
     {
       "key": "npt_jic_075",

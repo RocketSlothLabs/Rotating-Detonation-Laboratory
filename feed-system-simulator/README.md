@@ -153,6 +153,15 @@ Two Cv chains fall out of the seeded part library exactly: the 3/4"→3/8"
 reducer (2.7) with five 3/8" elements (1.7 each) gives **0.732**, and with
 three gives **0.923** — the two values the reference cases use.
 
+Three of those seeded Cv values are also tied to real parts the lab actually
+owns (per the RDL Master Inventory): the 3/4" ball valve, check valve and
+3/4"→3/8" reducer each carry a McMaster-Carr part number and rated pressure,
+confirmed against McMaster's own published specifications. The ball valve
+and check valve Cv values were already in this library before that lookup,
+originally derived from the validated reference cases — McMaster's spec
+table independently gives the same two numbers (10 and 7.4), which is real
+cross-validation between two independent sources, not a circular check.
+
 ## Using the canvas
 
 - Drag a node type (source, tee, accumulator, engine) from the palette onto the
