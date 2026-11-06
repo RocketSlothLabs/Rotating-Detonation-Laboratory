@@ -180,6 +180,20 @@ class FlowComponent:
     inlet_max_psig: float | None = None
     outlet_min_psig: float | None = None
     outlet_max_psig: float | None = None
+    outlet_droop_psi: float | None = None
+    """Outlet pressure droop from setpoint at the regulator's own rated
+    (fully open) capacity -- a magnitude in psi, never gauge-converted, which
+    is why this field has no trailing 'g' unlike every ``*_psig`` field above.
+
+    None (the default) models an ideal regulator: it holds ``outlet_setpoint_
+    psig`` exactly until its own Cv genuinely cannot keep up, at which point
+    it is reported as saturated and falls back to acting as a plain Cv
+    restriction. A real regulator's outlet pressure droops *progressively* as
+    demand increases, well before it is fully open -- set this from a
+    manufacturer's droop/regulation spec (often quoted as "psi droop at rated
+    flow") to model that instead. The solver uses this regulator's own ``cv``
+    to work out what "rated flow" means at the current inlet pressure, so no
+    separate flow-rating field is needed."""
 
     # Canvas placement (ignored by the solver)
     x: float = 0.0

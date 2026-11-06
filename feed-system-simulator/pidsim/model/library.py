@@ -29,6 +29,7 @@ class LibraryPart:
     inlet_max_psig: float | None = None
     outlet_min_psig: float | None = None
     outlet_max_psig: float | None = None
+    outlet_droop_psi: float | None = None
     notes: str = ""
 
     def instantiate(self, from_node: str, to_node: str) -> FlowComponent:
@@ -50,6 +51,7 @@ class LibraryPart:
             inlet_max_psig=self.inlet_max_psig,
             outlet_min_psig=self.outlet_min_psig,
             outlet_max_psig=self.outlet_max_psig,
+            outlet_droop_psi=self.outlet_droop_psi,
         )
 
 
@@ -70,6 +72,7 @@ def _parse(entry: dict) -> LibraryPart:
         inlet_max_psig=entry.get("inlet_max_psig"),
         outlet_min_psig=entry.get("outlet_min_psig"),
         outlet_max_psig=entry.get("outlet_max_psig"),
+        outlet_droop_psi=entry.get("outlet_droop_psi"),
         notes=entry.get("notes", ""),
     )
 

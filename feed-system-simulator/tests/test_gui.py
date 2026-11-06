@@ -461,6 +461,27 @@ def test_property_panel_edits_write_through_to_the_model(qapp):
     assert changed
 
 
+def test_switching_objects_hides_the_previous_form(qapp):
+    """A widget removed from the panel's layout must stop being visible
+    immediately, not linger until Qt gets around to deleteLater() -- it was
+    previously still drawing, overlapping the next object's form, until the
+    event loop happened to process the deferred deletion."""
+    project = o2_two_branch()
+    panel = PropertyPanel()
+
+    panel.show_object(project.network.components["main"])
+    from PySide6.QtWidgets import QGroupBox
+
+    # isVisible() depends on the whole ancestor chain being shown, which it
+    # never is in a headless test; isHidden() reflects only whether hide()
+    # was explicitly called on this widget, which is what the fix controls.
+    first_group = panel.findChildren(QGroupBox)[0]
+    assert not first_group.isHidden()
+
+    panel.show_object(project.network.nodes["tee"])
+    assert first_group.isHidden()
+
+
 def test_property_panel_handles_every_node_kind(qapp):
     project = accumulator_blowdown()
     panel = PropertyPanel()
@@ -487,3 +508,23 @@ def test_selecting_a_catalogue_part_fills_the_component(qapp):
     assert comp.cv == pytest.approx(9.3)
     assert comp.type is ComponentType.SOLENOID_VALVE
     assert comp.library_key == "solenoid_075"
+
+
+def test_regulator_droop_field_writes_through_and_zero_means_unset(qapp):
+    project = EXAMPLES["CH4 regulator chain (case 3)"]()
+    panel = PropertyPanel()
+    reg = project.network.components["reg"]
+    assert reg.outlet_droop_psi is None  # the seeded Matheson part has none
+
+    panel.show_object(reg)
+
+    from PySide6.QtWidgets import QDoubleSpinBox
+
+    droop_box = next(
+        s for s in panel.findChildren(QDoubleSpinBox) if s.suffix() == " psi"
+    )
+    droop_box.setValue(12.5)
+    assert reg.outlet_droop_psi == pytest.approx(12.5)
+
+    droop_box.setValue(0.0)
+    assert reg.outlet_droop_psi is None
