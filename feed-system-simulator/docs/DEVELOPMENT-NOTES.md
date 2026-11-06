@@ -575,3 +575,80 @@ the standard, correct way to avoid relying on that timing at all. Confirmed
 with a regression test using `isHidden()`, not `isVisible()` --
 `isVisible()` depends on the entire ancestor chain being shown, which it
 never is in a headless test, so it cannot distinguish the fix from the bug.
+
+---
+
+## 15. Seeding the part library from the lab's real inventory
+
+The RDL Master Inventory spreadsheet (compiled from purchase orders and the
+lab's own part inventory, maintained outside this repo) has a "Propellant
+Feed System" section with real McMaster-Carr and Grainger part numbers for
+hardware the lab physically owns. Looked these up directly against
+McMaster's own published specifications rather than taking the BOM's item
+name at face value, the same discipline as every other number in this
+project.
+
+### Confirmed and added
+
+Three seeded Cv values are now tied to a specific owned part, verified
+against McMaster's spec table for that exact part number:
+
+| Seed entry | Part | McMaster spec |
+|---|---|---|
+| `ball_valve_075` | 46325K29 | Cv **10**, 800 psi @ 100F |
+| `check_valve_075_mm` | 1874N18 | Cv **7.4**, 3000 psi @ 70F, 1 psi cracking |
+| `reducer_075m_038f` | 48805K749 | 5300 psi @ 72F (no Cv published for this part) |
+
+The first two are genuine cross-validation, not a circular check: both Cv
+values were already in this library, originally derived from the validated
+hand-calculated reference cases (see the file-level comment in
+`components.json` on how the reducer + hose chain produces 0.732 and 0.923).
+An independent source -- the manufacturer's own spec table for the exact
+part the lab owns -- gives the identical numbers. That is about as strong a
+confirmation as this project can get without an instrumented test stand (see
+§3 and the physics-validity discussion in the project history: this closes
+the "is the Cv itself right" question for these two specific parts, which no
+amount of solver-side validation could ever touch).
+
+### What this lookup could and couldn't do
+
+McMaster's product pages are JS-rendered and intermittently returned empty
+content to automated fetching -- not a hard block, since several lookups on
+the exact same URL pattern (`mcmaster.com/product/<part>/`) succeeded, just
+unreliable. Burning many retries chasing full coverage on a source behaving
+this way isn't worth it; three solid, verified data points plus knowing
+which lookups are still open is more useful than an inconsistent full sweep.
+
+Real parts identified in the BOM but **not** added to the seed, because no
+reviewed source gave a verified Cv or because they don't map to anything the
+solver models -- listed here so whoever has datasheet access next doesn't
+have to re-derive which parts are worth chasing:
+
+- **4443K413** (3/4" M to 1/4" F reducer) and **5288N15** (1/4"-3/4" bushing
+  adapter) -- real reducing fittings the lab owns, but a 3/4->1/4 reduction
+  is meaningfully more restrictive than the 3/4->3/8 one already seeded, so
+  its Cv cannot be assumed from that one. Worth adding once looked up
+  directly.
+- **5482K21** (3/4" precision 37-degree flared fitting, i.e. JIC) -- McMaster
+  page would not render for this one across several attempts.
+- Three regulators with real part numbers (**46Z484** nitrogen, plus a CDL
+  LX65 oxygen regulator and an Airgas propane regulator with no catalog part
+  number at all) -- none of the three reviewed sources publish a Cv for any
+  of them. A regulator entry with no Cv is not just incomplete, it is
+  actively unusable for sizing (the model would read it as Cv=0, i.e.
+  blocking all flow), so these were left out entirely rather than seeded
+  with a placeholder.
+- **Pressure Relief Valve, 3/4"** (Grainger 60UL47) -- not just missing data:
+  there is no `ComponentType` for a relief valve in this model at all. A
+  relief valve is normally *closed* until a cracking pressure, then opens --
+  categorically different behaviour from every existing type, none of which
+  model a pressure-triggered state change. Mapping it onto `ball_valve` or
+  `check_valve` would misrepresent how it actually behaves. Modeling it
+  properly is a model-layer addition (a new `ComponentType.RELIEF_VALVE` with
+  its own open/closed state driven by inlet pressure), not a library seed --
+  noted here as a real gap surfaced by real inventory, not a hypothetical one.
+- **Tee Connector SS, 3/4"** (McMaster 4443K645) -- the lab owns 9 of these,
+  but a tee is a `NodeKind.TEE` in this model, not a `FlowComponent`; the
+  part library only ever instantiates two-port restrictions. There is
+  nothing to seed here -- the user places a tee node on the canvas, there is
+  no "part" standing in for it the way there is for a valve or fitting.
