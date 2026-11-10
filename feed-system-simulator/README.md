@@ -134,6 +134,13 @@ splits, merges and parallel paths all fall out of the same residual.
 
 Transients integrate only vessel state; the rest of the network is solved
 quasi-statically at each step (line volume is negligible next to vessel volume).
+A transient run stops automatically once every vessel's net flow has settled
+to within `equilibrium_rtol` (default 1e-4) of its own peak — without this, a
+vessel approaching its backpressure can cost tens of thousands of extra
+integration steps resolving an ever-flatter tail that adds nothing visible to
+the result. Skipped whenever a valve schedule still has a pending transition,
+so a temporary flow lull is never mistaken for true equilibrium. Pass
+`stop_at_equilibrium=False` to disable it.
 
 ## Validation
 

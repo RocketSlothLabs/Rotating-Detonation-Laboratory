@@ -652,3 +652,149 @@ have to re-derive which parts are worth chasing:
   part library only ever instantiates two-port restrictions. There is
   nothing to seed here -- the user places a tee node on the canvas, there is
   no "part" standing in for it the way there is for a valve or fitting.
+
+---
+
+## 16. Solver robustness at scale
+
+Set out to answer one question: does the nodal solver's primary method
+(`scipy.optimize.root`, `method='hybr'`) stay reliable as a network grows, or
+does it start quietly needing the slower `least_squares` fallback? Built two
+synthetic network generators to find out, and ended up finding something
+more important than the original question.
+
+### Wide branching off one tee is nearly free
+
+First instinct -- fan a source out through one tee into many parallel
+branches, all merging at the engine -- turned out to not stress the solver
+at all. Up to 120 parallel branches, the unknown count stayed at exactly
+**one** (the tee's own pressure) regardless of branch count, since every leg
+shares that single node. More branches just means more *equations* evaluated
+at a fixed set of unknowns, which is cheap (wall time stayed under 20 ms even
+at 120 branches). This is a genuinely useful finding on its own: an injector
+manifold with a very large number of parallel feed branches off one tee
+poses essentially no solver difficulty, however wide it gets.
+
+### What actually scales: repeated split-merge stages
+
+Unknown count only grows with repeated split-then-merge-back stages in
+series (a "ladder" network: each stage contributes two new junction
+pressures). Stress-testing that shape found:
+
+- The primary method (`hybr`) **never once** needed the `least_squares`
+  fallback, up to 200 simultaneous unknowns (401 components) -- always
+  converging to residuals many orders of magnitude tighter than the 1e-9 bar
+  the solver itself uses to decide whether the fallback is needed.
+- A 10,000x Cv mismatch between parallel branches within the same stage left
+  residuals and evaluation counts essentially unchanged. The `ln(P)`
+  parameterization keeps this well-conditioned regardless of how extreme the
+  mismatch is.
+- Wall-clock time for a single solve, however, grows noticeably faster than
+  linearly with unknown count: 30 unknowns ~190 ms, 100 unknowns ~3.8 s, 150
+  ~16.3 s, 200 ~28.5 s -- consistent with the O(N) finite-difference
+  Jacobian estimate and O(N^3) dense linear algebra `hybr`'s underlying
+  MINPACK routine does internally, with no sparsity exploited.
+
+This is a genuine, documented limit, deliberately **not** fixed here: making
+it scale better would mean supplying an analytic or sparse Jacobian and
+switching solver methods -- a real rewrite of the numerical core, not a small
+change, and one the project has no evidence it actually needs. Given fan-out
+is nearly free, reaching 100+ *unknowns* requires on the order of 50 genuine
+split-merge stages in series, which is a far deeper topology than any real
+propellant feed system this lab has built or is likely to build. A
+regression test (`test_a_realistically_large_branching_network_solves_fast_
+without_fallback`) covers 60 unknowns / 241 components -- deeper than
+anything built so far -- confirming it stays fast and fallback-free; the
+full sweep to 200 unknowns was exploratory, not committed as a test, because
+30 seconds is too slow for the suite to pay on every run for a size the
+project doesn't need yet.
+
+### The bigger find: transient runs can explode near equilibrium, independent of network size
+
+Pushing into the transient solver (since `solve_quasi_steady` runs once per
+RHS evaluation, so whatever the steady solver costs gets paid repeatedly)
+found something that had nothing to do with branching complexity at all. A
+**trivially simple** one-component network (accumulator discharging directly
+into a fixed backpressure, zero branching) needed:
+
+| Run to | `solve_quasi_steady` calls | time in it | vessel pressure |
+|---|---|---|---|
+| t=1.0 s | 54 | 1 ms | 410 psig (target 400) |
+| t=2.0 s | 20,076 | 1.4 s | 400.00 psig |
+| t=4.0 s | 96,294 | 1.9 s | 400.00 psig |
+
+Per-call cost stayed tiny throughout (microseconds) -- almost all the
+growth was in `solve_ivp`'s own step count, not the nodal solve. As the
+vessel's pressure asymptotically approaches its backpressure, `dP/dt`
+shrinks toward (but never exactly reaches) zero, and resolving that
+ever-flatter tail under the solver's tight `rtol=1e-8` costs an exploding
+number of integration steps to add essentially nothing to the reported
+curve past the point where it is already indistinguishable from equilibrium.
+
+Combined with a complex (many-unknown) network, where each of those calls
+costs milliseconds instead of microseconds rather than cents, the two
+effects multiply: a 2-stage, 3-branch ladder network run far enough to
+approach its own backpressure took over 5 minutes and had not finished --
+not because of a bug, but because it was correctly, slowly grinding through
+tens of thousands of expensive re-solves chasing a curve that had already
+visually flattened out.
+
+### The fix: a terminal "effectively at equilibrium" event
+
+`solve_transient` gained `stop_at_equilibrium` (default on) and
+`equilibrium_rtol` (default 1e-4), mirroring the existing `stop_at_ambient`
+pattern. A single combined event tracks each vessel's **net** mass flow
+(`mdot_in - mdot_out`, the same quantity `rhs()` already uses to drive
+`dP/dt`/`dm/dt`) against a running peak for that vessel, and terminates the
+whole integration once every vessel's net flow has decayed to within
+`equilibrium_rtol` of its own peak.
+
+Two things worth being deliberate about:
+
+- **Net, not gross, flow.** A *coupled* vessel being continuously fed can
+  settle at a large, steady, nonzero throughput once inflow balances
+  outflow -- gross flow staying large must never prevent the stop, only the
+  net flow that actually drives the vessel's state should. Checked directly
+  with a dedicated test (`test_equilibrium_stop_uses_net_not_gross_flow_
+  for_a_coupled_vessel`): the coupled case reaches a stop with substantial
+  feed and discharge flow both still present.
+- **Skipped automatically when a valve schedule has a future transition
+  pending.** A scheduled valve closing and reopening would create a
+  temporary flow lull that an unconditional check could mistake for true
+  equilibrium, permanently (it is a *terminal* event) cutting off real
+  dynamics that were about to resume. Rather than trying to detect "a
+  temporary dip" from inside an instantaneous zero-crossing check, the
+  simpler and safer rule is: if any component's schedule still has an
+  open_time or close_time, don't add the event at all. Confirmed with
+  `test_equilibrium_stop_is_skipped_with_a_pending_valve_schedule`.
+
+Result, re-measured on the same trivial network: t=2.0 s dropped from 20,076
+calls / 1.4 s to 164 calls / 6 ms; t=4.0 s from 96,294 calls / 1.9 s to 186
+calls / 8 ms -- both reaching the identical 400.00 psig answer, just without
+grinding through the flattened-out tail to get there.
+
+**Honest tradeoff, not a free lunch.** The event function itself needs its
+own `snapshot()` call, separate from `rhs()`'s -- real added cost per step,
+roughly doubling it. For the large, already-expensive ladder network
+*before* it reaches equilibrium, this made intermediate-length runs slower,
+not faster (measured directly: a 0.5 s run went from 8,114 calls / 12.9 s to
+13,756 calls / 26.3 s). But that same network, pushed to where it actually
+reaches equilibrium (t=0.7 s), terminated at the exact right answer (150.00
+psig) in 25 s with the fix, against an unfixed run that was still running,
+with no end in sight, after 5+ minutes. The event is a bet that bounding the
+worst case is worth roughly doubling the cost of runs that don't hit it --
+left on by default because a user accidentally running a transient
+simulation well past where anything interesting still happens is a more
+likely accident than deliberately picking a large network and a short,
+equilibrium-avoiding window. `stop_at_equilibrium=False` is there for anyone
+who has measured otherwise for their own case.
+
+### Verification
+
+Full suite passes throughout, including the existing case 4/5 transient
+tests completely unchanged -- both end at t=1.0 s, nowhere near their own
+equilibrium, so the new event never fires for either and was never expected
+to. Five new tests cover the equilibrium-stop mechanism directly (early
+termination at the right pressure, the opt-out, the schedule gate, and the
+net-vs-gross distinction for a coupled vessel); two more exercise the
+steady solver at a realistic "deeper than anything built so far" scale.

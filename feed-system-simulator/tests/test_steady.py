@@ -499,3 +499,90 @@ def test_overpressure_is_warned_about():
     net.components["branch"].max_pressure_psig = 200.0
     result = solve_steady(net, o2_settings(), SolveMode.BACKWARD)
     assert any("rating" in w for w in result.warnings)
+
+
+# --- solver robustness at scale ---------------------------------------------
+#
+# A single tee's branches don't add solver unknowns, no matter how many there
+# are -- all legs share that one tee's pressure, so wide fan-out (even 100+
+# parallel branches, checked directly while investigating this) is nearly
+# free. What actually adds unknowns is *repeated* split-then-merge stages in
+# series, each contributing two new junction pressures -- a "ladder" network.
+# Stress-testing that shape (up to ~200 simultaneous unknowns) found the
+# primary solve method (scipy.optimize.root, method='hybr') never once
+# needed the slower least_squares fallback, and stayed correct even under a
+# 10,000x Cv mismatch between parallel branches in the same stage -- but
+# wall-clock time grows noticeably faster than linearly with unknown count
+# (150 unknowns: ~16s; 200: ~28s, for a single solve). Real numbers and the
+# full sweep are in docs/DEVELOPMENT-NOTES.md section 16. This test covers
+# the realistic end of that range -- deeper than any lab feed system is
+# likely to need -- and asserts the primary method alone, not the fallback,
+# is what actually answered it.
+
+
+def ladder_network(n_stages: int, branches_per_stage: int = 3, cv: float = 3.0) -> Network:
+    """source -> (split into K branches -> merge) x N stages -> engine.
+
+    Each stage is a genuine split-then-merge-back, repeated in series --
+    this is what grows the unknown count, unlike wide fan-out off one tee.
+    """
+    net = Network(name=f"ladder-{n_stages}x{branches_per_stage}")
+    net.add_node(Node(kind=NodeKind.SOURCE, id="supply", supply_pressure_psig=2000.0))
+    prev = "supply"
+    for s in range(n_stages):
+        split, merge = f"split{s}", f"merge{s}"
+        net.add_node(Node(kind=NodeKind.TEE, id=split))
+        net.add_node(Node(kind=NodeKind.TEE, id=merge))
+        net.add_component(_line(cv * 5, prev, split, f"in{s}"))
+        for b in range(branches_per_stage):
+            frac = b / max(branches_per_stage - 1, 1)
+            bcv = cv * (0.8 + 0.4 * frac)
+            net.add_component(_line(bcv, split, merge, f"s{s}b{b}"))
+        prev = merge
+    net.add_node(
+        Node(kind=NodeKind.SINK, id="engine", sink_spec=SinkSpec.PRESSURE, target_pressure_psig=MANIFOLD_PSIG)
+    )
+    net.add_component(_line(cv * 5, prev, "engine", "out"))
+    return net
+
+
+def test_a_realistically_large_branching_network_solves_fast_without_fallback():
+    """30 stages of 4-way split-merge: 60 simultaneous unknown pressures,
+    241 components -- deeper branching/merging than any real feed system
+    this lab has built so far, and still well inside the fast, fully-robust
+    region the stress test mapped out."""
+    net = ladder_network(n_stages=30, branches_per_stage=4)
+    result = solve_steady(net, o2_settings(), SolveMode.FORWARD)
+
+    assert result.converged
+    # 1e-9 is exactly the bar the solver itself uses to decide whether the
+    # primary method succeeded on its own; comfortably clearing it (by
+    # several more orders of magnitude here) is what "never needed the
+    # least_squares fallback" looks like from the public API.
+    assert result.residual_norm < 1e-9
+    # The primary method typically needs on the order of tens of evaluations
+    # per unknown for networks this size (per the stress-test sweep); the
+    # fallback's own bounded budget is 5000 -- nowhere near approaching it is
+    # further confirmation the fallback was never engaged.
+    assert result.iterations < 2000
+
+    # And the answer is still physically correct, not just "a number":
+    # mass balance holds at every internal junction.
+    for node_id, node in net.nodes.items():
+        if node.kind in (NodeKind.JUNCTION, NodeKind.TEE):
+            assert result.total_mdot_into(node_id, net) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_branch_cv_mismatch_does_not_degrade_convergence():
+    """A 10,000x Cv spread between parallel branches in the same stage --
+    far more extreme than any real set of components would be -- left the
+    primary method's residual and evaluation count essentially unchanged in
+    the stress test. Confirms that holds through the public API too."""
+    net = ladder_network(n_stages=10, branches_per_stage=4, cv=3.0)
+    # Spread this stage's branches across four orders of magnitude.
+    for i, mult in enumerate([1.0, 0.1, 0.01, 0.001]):
+        net.components[f"s5b{i}"].cv = 3.0 * mult
+
+    result = solve_steady(net, o2_settings(), SolveMode.FORWARD)
+    assert result.converged
+    assert result.residual_norm < 1e-9

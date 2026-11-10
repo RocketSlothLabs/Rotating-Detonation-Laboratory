@@ -227,6 +227,9 @@ def _propagate_node_temperatures(
     return temps
 
 
+_DEFAULT_EQUILIBRIUM_RTOL = 1e-4
+
+
 def solve_transient(
     network: Network,
     settings: ProjectSettings,
@@ -235,9 +238,28 @@ def solve_transient(
     rtol: float = _DEFAULT_RTOL,
     atol: float = _DEFAULT_ATOL,
     stop_at_ambient: bool = True,
+    stop_at_equilibrium: bool = True,
+    equilibrium_rtol: float = _DEFAULT_EQUILIBRIUM_RTOL,
     validate: bool = True,
 ) -> TransientResult:
-    """Integrate the network over ``t_span`` seconds."""
+    """Integrate the network over ``t_span`` seconds.
+
+    ``stop_at_equilibrium`` adds a terminal event that ends the run once
+    every vessel's net mass flow (the thing that actually drives its own
+    dP/dt or dm/dt -- not gross flow, so a *coupled* vessel correctly keeps
+    running until its throughput itself stops changing, not until flow
+    stops) has decayed to ``equilibrium_rtol`` of its own peak magnitude for
+    the run. Without this, a vessel approaching its backpressure needs
+    solve_ivp to resolve an ever-flatter asymptotic tail under the solver's
+    tight ``rtol``, which can cost tens of thousands of extra integration
+    steps to add essentially nothing to the reported pressure curve -- see
+    DEVELOPMENT-NOTES.md section 16 for the numbers that motivated this.
+
+    Skipped automatically whenever any component has a valve schedule with a
+    future open/close time: terminating the instant flow looks small would
+    risk mistaking a scheduled valve's temporary lull for true equilibrium
+    and cutting off real dynamics that were about to resume.
+    """
     if validate:
         network.raise_on_errors()
 
@@ -339,14 +361,17 @@ def solve_transient(
             return rankine_to_kelvin(settings.t_flow_R)
         return weighted / total
 
+    peak_net_mdot = {st.node_id: 1e-12 for st in states}  # tiny floor, never 0
+
     def rhs(t: float, y: np.ndarray) -> np.ndarray:
         _, flows, temps_K = snapshot(t, y)
         dy = np.zeros_like(y)
         for st in states:
             mdot_in, mdot_out = vessel_balance(st, flows)
+            net_out = mdot_out - mdot_in
+            peak_net_mdot[st.node_id] = max(peak_net_mdot[st.node_id], abs(net_out))
             if st.model is VesselModel.ISENTROPIC:
                 p, _ = st.decode(y)
-                net_out = mdot_out - mdot_in
                 dy[st.offset] = pa_to_psi(
                     isen.dPdt(net_out, psi_to_pa(p), st.spec.K, st.spec.gamma)
                 )
@@ -357,6 +382,21 @@ def solve_transient(
                 dy[st.offset] = mdot_in - mdot_out
                 dy[st.offset + 1] = mdot_in * cp * t_in - mdot_out * cp * t_local
         return dy
+
+    def equilibrium_margin(t: float, y: np.ndarray) -> float:
+        """Positive while any vessel is still meaningfully changing; crosses
+        to negative, terminally, only once *every* vessel's net flow has
+        decayed below its own threshold -- a coupled vessel's gross
+        throughput can stay large forever, so this checks the net flow that
+        actually drives its state, same quantity rhs() already uses."""
+        _, flows, _ = snapshot(t, y)
+        margins = []
+        for st in states:
+            mdot_in, mdot_out = vessel_balance(st, flows)
+            net_now = abs(mdot_out - mdot_in)
+            threshold = equilibrium_rtol * peak_net_mdot[st.node_id]
+            margins.append(net_now - threshold)
+        return max(margins)
 
     events = []
     if stop_at_ambient:
@@ -369,6 +409,18 @@ def solve_transient(
             depleted.terminal = True
             depleted.direction = -1.0
             events.append(depleted)
+
+    has_pending_schedule = any(
+        comp.schedule is not None
+        and (comp.schedule.open_time is not None or comp.schedule.close_time is not None)
+        for comp in network.components.values()
+    )
+    equilibrium_event_index: int | None = None
+    if stop_at_equilibrium and not has_pending_schedule:
+        equilibrium_margin.terminal = True
+        equilibrium_margin.direction = -1.0
+        equilibrium_event_index = len(events)
+        events.append(equilibrium_margin)
 
     y0 = np.array([v for st in states for v in st.initial()], dtype=float)
     sol = solve_ivp(
@@ -406,10 +458,21 @@ def solve_transient(
 
     notes: list[str] = []
     if sol.status == 1:
-        notes.append(
-            f"Integration stopped at t={t_end:.4f} s: a vessel reached ambient "
-            f"pressure ({settings.ambient_pressure_psia:.2f} psia)"
+        hit_equilibrium = (
+            equilibrium_event_index is not None
+            and sol.t_events[equilibrium_event_index].size > 0
         )
+        if hit_equilibrium:
+            notes.append(
+                f"Integration stopped at t={t_end:.4f} s: net flow into every "
+                f"vessel had decayed to within {equilibrium_rtol:g} of its peak "
+                "for this run -- effectively at steady state"
+            )
+        else:
+            notes.append(
+                f"Integration stopped at t={t_end:.4f} s: a vessel reached ambient "
+                f"pressure ({settings.ambient_pressure_psia:.2f} psia)"
+            )
     for st in states:
         notes.append(f"{st.name}: integrated as {st.model.value}")
 

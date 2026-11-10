@@ -420,6 +420,90 @@ def test_branches_off_a_junction_both_see_its_propagated_temperature():
     assert tee_t < 294.44 - 10.0  # genuinely cooled, not flat default
 
 
+# --- stopping early once a vessel reaches equilibrium ----------------------
+#
+# Without this, a vessel approaching its own backpressure forces solve_ivp to
+# resolve an ever-flatter asymptotic tail under a tight rtol, which can cost
+# tens of thousands of extra integration steps for runs that explore far past
+# where anything practically interesting still happens. Networks here are
+# deliberately tiny and fast -- the scaling case that motivated this (a
+# 100+ component ladder network taking 5+ minutes) is recorded with real
+# numbers in docs/DEVELOPMENT-NOTES.md section 16, not re-run here.
+
+
+def near_equilibrium_network(charge_psig: float = 500.0, target_psig: float = 480.0):
+    """A small pressure gap (20 psi) relative to a 10 L vessel's own cv=0.732
+    discharge settles out quickly -- built specifically to reach equilibrium
+    well within a generously long requested time span."""
+    net = isolated_network()
+    net.nodes["engine"].target_pressure_psig = target_psig
+    return net
+
+
+def test_equilibrium_stop_terminates_a_run_early_at_the_right_pressure():
+    net = near_equilibrium_network()
+    result = solve_transient(net, o2_settings(), (0.0, 1000.0), n_output=11)
+
+    # Requested 1000 s; a vessel discharging into a backpressure only 20 psi
+    # below its own charge reaches that backpressure almost immediately, so
+    # the run must end far short of the requested span.
+    assert result.t[-1] < 10.0
+    assert psia_to_psig(result.at(result.t[-1])["node_pressure_psia"]["acc"]) == pytest.approx(
+        480.0, abs=0.5
+    )
+    assert any("effectively at steady state" in e for e in result.events)
+    assert not any("ambient pressure" in e for e in result.events)
+
+
+def test_equilibrium_stop_can_be_disabled():
+    """Explicitly opting out must reproduce the old unconditional behaviour:
+    keep integrating for the full requested span regardless of how early
+    equilibrium was reached."""
+    net = near_equilibrium_network()
+    result = solve_transient(
+        net, o2_settings(), (0.0, 2.0), n_output=11, stop_at_equilibrium=False
+    )
+    assert result.t[-1] == pytest.approx(2.0)
+    assert not any("effectively at steady state" in e for e in result.events)
+
+
+def test_equilibrium_stop_is_skipped_with_a_pending_valve_schedule():
+    """A scheduled valve change later in the run means a temporary flow lull
+    now must not be mistaken for true equilibrium and cut the run short --
+    the gate should suppress the event entirely whenever one is pending."""
+    net = near_equilibrium_network()
+    net.components["feed"].schedule = ValveSchedule(open_time=5.0, initially_open=False)
+
+    result = solve_transient(net, o2_settings(), (0.0, 10.0), n_output=11)
+    assert result.t[-1] == pytest.approx(10.0)
+    assert not any("effectively at steady state" in e for e in result.events)
+
+
+def test_equilibrium_stop_uses_net_not_gross_flow_for_a_coupled_vessel():
+    """A continuously-fed vessel can settle at a steady, large, *nonzero*
+    throughput once inflow balances outflow -- gross flow staying large must
+    not prevent the stop; only the net flow that actually drives dP/dt (or
+    dm/dt) should be checked, the same quantity rhs() already uses."""
+    net = coupled_network()
+    net.nodes["engine"].target_pressure_psig = 490.0  # close to the 500 psig charge
+
+    result = solve_transient(net, o2_settings(), (0.0, 1000.0), n_output=11)
+    # Two state variables (mass and energy) both have to settle, not just
+    # one, so this genuinely takes longer than the isentropic case above --
+    # the only thing that matters here is that it stops well short of the
+    # requested 1000 s span, not a specific fast time.
+    assert result.t[-1] < 200.0
+
+    snap = result.at(result.t[-1])
+    feed_mdot = snap["component_mdot_kgs"]["feed"]
+    discharge_mdot = snap["component_mdot_kgs"]["discharge"]
+    # Gross throughput is substantial -- this genuinely is the coupled,
+    # still-flowing case, not a trivial zero-flow shutdown.
+    assert feed_mdot > 0.01
+    assert discharge_mdot == pytest.approx(feed_mdot, rel=0.05)
+    assert any("effectively at steady state" in e for e in result.events)
+
+
 # --- errors ----------------------------------------------------------------
 
 
